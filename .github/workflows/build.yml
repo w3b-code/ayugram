@@ -1,0 +1,120 @@
+name: Build AyuGram iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_tag:
+        description: "Тег Telegram-iOS, к которому применяется патч"
+        default: "release-13.1.1"
+        required: true
+      runner:
+        description: "macOS-раннер (нужен самый свежий Xcode)"
+        default: "macos-26"
+        required: true
+  push:
+    branches: [main]
+    paths:
+      - "patches/**"
+      - ".github/workflows/build.yml"
+
+env:
+  TELEGRAM_TAG: ${{ inputs.telegram_tag || 'release-13.1.1' }}
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Check API credentials
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          if [ -z "$API_ID" ] || [ -z "$API_HASH" ]; then
+            echo "::error::Добавьте секреты TELEGRAM_API_ID и TELEGRAM_API_HASH (my.telegram.org → API development tools)."
+            exit 1
+          fi
+
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Clone Telegram-iOS
+        run: |
+          git clone --recursive -j8 --depth 1 --shallow-submodules \
+            --branch "$TELEGRAM_TAG" https://github.com/TelegramMessenger/Telegram-iOS.git telegram
+
+      - name: Apply AyuGram patches
+        working-directory: telegram
+        run: |
+          for p in ../patches/*.patch; do
+            echo "Applying $p"
+            git apply --whitespace=nowarn "$p"
+          done
+
+      - name: Write build configuration
+        working-directory: telegram
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          # bundle_id and team_id must match build-system/fake-codesigning;
+          # the sideloading tool re-signs the IPA with your own Apple ID.
+          cat > ../ayugram-configuration.json <<EOF
+          {
+            "bundle_id": "ph.telegra.Telegraph",
+            "api_id": "$API_ID",
+            "api_hash": "$API_HASH",
+            "team_id": "C67CF9S4VU",
+            "app_center_id": "0",
+            "is_internal_build": "false",
+            "is_appstore_build": "false",
+            "appstore_id": "0",
+            "app_specific_url_scheme": "tg",
+            "premium_iap_product_id": "org.telegram.telegramPremium.monthly",
+            "enable_siri": false,
+            "enable_icloud": false
+          }
+          EOF
+
+      - name: Import fake signing certificate
+        working-directory: telegram
+        run: python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+
+      - name: Restore Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: ~/telegram-bazel-cache
+          key: bazel-${{ env.TELEGRAM_TAG }}-${{ hashFiles('patches/**') }}
+          restore-keys: |
+            bazel-${{ env.TELEGRAM_TAG }}-
+
+      - name: Build
+        working-directory: telegram
+        run: |
+          python3 build-system/Make/Make.py \
+            --overrideXcodeVersion \
+            --cacheDir="$HOME/telegram-bazel-cache" \
+            build \
+            --configurationPath=../ayugram-configuration.json \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --buildNumber=${{ github.run_number }} \
+            --configuration=release_arm64 \
+            --outputBuildArtifactsPath=../artifacts
+
+      - name: Rename IPA
+        run: mv artifacts/Telegram.ipa "artifacts/AyuGram-iOS-${TELEGRAM_TAG}-${{ github.run_number }}.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AyuGram-iOS-${{ github.run_number }}
+          path: artifacts/*.ipa
+          retention-days: 30
