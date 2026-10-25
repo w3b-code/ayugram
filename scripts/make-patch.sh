@@ -6,5 +6,5 @@ TG="${1:?path to the Telegram-iOS checkout}"
 OUT="$(cd "$(dirname "$0")/.." && pwd)/patches/0001-ayugram.patch"
 cd "$TG"
 git add -A -N submodules
-git diff --binary > "$OUT"
+git -c core.abbrev=8 diff --binary > "$OUT"
 echo "Wrote $OUT"

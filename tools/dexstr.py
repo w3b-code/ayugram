@@ -11,4 +11,4 @@ for p in sys.argv[2:]:
     for i in range(n):
         so=struct.unpack_from('<I',b,off+4*i)[0]
         _,o=uleb(b,so);e=b.index(0,o)
-        out.write(b[o:e].decode('utf-8','replace').replace('\n','\n')+'\n')
+        out.write(b[o:e].decode('utf-8','replace').replace('\n','\\n')+'\n')

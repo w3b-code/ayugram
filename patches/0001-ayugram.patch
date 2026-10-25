@@ -596,7 +596,7 @@ index 3d99e59d..a1372c5c 100644
                  if let generatedEvent = generatedEvent {
                      addedReactionEvents.append(generatedEvent)
 diff --git a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
-index 7256668b..0d0bee09 100644
+index 7256668b..8e218a73 100644
 --- a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 +++ b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 @@ -1,4 +1,5 @@
@@ -605,7 +605,7 @@ index 7256668b..0d0bee09 100644
  internal import TelegramApi
  import Postbox
  import SwiftSignalKit
-@@ -53,7 +54,16 @@ private final class AccountPresenceManagerImpl {
+@@ -53,11 +54,25 @@ private final class AccountPresenceManagerImpl {
              }, queue: self.queue)
              self.onlineTimer = timer
              timer.start()
@@ -623,6 +623,16 @@ index 7256668b..0d0bee09 100644
          } else {
              self.onlineTimer?.invalidate()
              self.onlineTimer = nil
+-            request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
++            if AyuSettings.shared.values.suppressesOnline {
++                // AyuGram ghost mode: "offline" would also move "last seen" to now.
++                request = .single(.boolTrue)
++            } else {
++                request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
++            }
+         }
+         self.isPerformingUpdate.set(true)
+         self.currentRequestDisposable.set((request
 diff --git a/submodules/TelegramCore/Sources/SyncCore/SyncCore_StandaloneAccountTransaction.swift b/submodules/TelegramCore/Sources/SyncCore/SyncCore_StandaloneAccountTransaction.swift
 index 91c5c772..f547444f 100644
 --- a/submodules/TelegramCore/Sources/SyncCore/SyncCore_StandaloneAccountTransaction.swift
