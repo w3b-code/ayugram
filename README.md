@@ -4,7 +4,7 @@
 Функции взяты из разбора Android-сборки `vanilla-AyuGram-lite-20261005.apk`, подробности в
 [docs/APK_ANALYSIS.md](docs/APK_ANALYSIS.md).
 
-Репозиторий не содержит кода Telegram: в нём только патч к тегу `release-13.1.1`
+Репозиторий не содержит кода Telegram: в нём только патч к тегу `release-13.0.0`
 ([patches/0001-ayugram.patch](patches/0001-ayugram.patch)). GitHub Actions скачивает Telegram-iOS,
 накладывает патч и собирает `.ipa`.
 
@@ -38,11 +38,11 @@
 
 ### Если сборка падает на версии Xcode
 
-Telegram-iOS 13.1.1 рассчитан на Xcode 27.1 (`versions.json`). Workflow выбирает самый новый
-Xcode на раннере и передаёт `--overrideXcodeVersion`. Если на `macos-26` компилятор окажется
-слишком старым:
-- при запуске укажите другой раннер (например `macos-27`, когда он появится на GitHub), или
-- укажите более старый тег Telegram-iOS, если патч на него накладывается.
+Telegram-iOS 13.0.0 рассчитан на Xcode 26.6 (`versions.json`), он есть на раннере `macos-26`.
+Workflow выбирает самый новый Xcode на раннере и передаёт `--overrideXcodeVersion`.
+Теги 13.1 и новее требуют Xcode 27.1 и API iOS 27.1: на `macos-26` они не собираются
+(`value of type 'UIView' has no member 'reservedRegions'`). Для них нужен раннер с Xcode 27
+(например `macos-27`, когда он появится на GitHub) и патч, перенесённый на этот тег.
 
 ## Установка на iPhone
 
@@ -58,7 +58,7 @@ Xcode на раннере и передаёт `--overrideXcodeVersion`. Если
 ## Изменение патча
 
 ```sh
-git clone --depth 1 --branch release-13.1.1 https://github.com/TelegramMessenger/Telegram-iOS tg
+git clone --depth 1 --branch release-13.0.0 https://github.com/TelegramMessenger/Telegram-iOS tg
 cd tg && git apply ../patches/0001-ayugram.patch
 # …правки…
 ../scripts/make-patch.sh .

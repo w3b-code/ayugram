@@ -5,7 +5,7 @@ on:
     inputs:
       telegram_tag:
         description: "Тег Telegram-iOS, к которому применяется патч"
-        default: "release-13.1.1"
+        default: "release-13.0.0"
         required: true
       runner:
         description: "macOS-раннер (нужен самый свежий Xcode)"
@@ -18,7 +18,7 @@ on:
       - ".github/workflows/build.yml"
 
 env:
-  TELEGRAM_TAG: ${{ inputs.telegram_tag || 'release-13.1.1' }}
+  TELEGRAM_TAG: ${{ inputs.telegram_tag || 'release-13.0.0' }}
 
 jobs:
   build:

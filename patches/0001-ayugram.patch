@@ -154,10 +154,10 @@ index 00000000..a0e331bf
 +    }
 +}
 diff --git a/submodules/SettingsUI/BUILD b/submodules/SettingsUI/BUILD
-index 2b819a9c..0560b7dd 100644
+index 32438133..45acd0c5 100644
 --- a/submodules/SettingsUI/BUILD
 +++ b/submodules/SettingsUI/BUILD
-@@ -34,6 +34,7 @@ swift_library(
+@@ -35,6 +35,7 @@ swift_library(
          "//submodules/GalleryUI:GalleryUI",
          "//submodules/Geocoding:Geocoding",
          "//submodules/ItemListUI:ItemListUI",
@@ -348,7 +348,7 @@ index 00000000..ee5feaac
 +    return ItemListController(context: context, state: signal)
 +}
 diff --git a/submodules/TelegramCore/BUILD b/submodules/TelegramCore/BUILD
-index d4ed7767..144950c6 100644
+index 1234d53b..7859f9ed 100644
 --- a/submodules/TelegramCore/BUILD
 +++ b/submodules/TelegramCore/BUILD
 @@ -30,6 +30,7 @@ swift_library(
@@ -360,7 +360,7 @@ index d4ed7767..144950c6 100644
      visibility = [
          "//visibility:public",
 diff --git a/submodules/TelegramCore/Sources/Account/AccountManager.swift b/submodules/TelegramCore/Sources/Account/AccountManager.swift
-index bf906980..ee03f18a 100644
+index a59eefd1..dbf1e3d0 100644
 --- a/submodules/TelegramCore/Sources/Account/AccountManager.swift
 +++ b/submodules/TelegramCore/Sources/Account/AccountManager.swift
 @@ -222,6 +222,8 @@ private var declaredEncodables: Void = {
@@ -507,7 +507,7 @@ index 00000000..61533b3d
 +    }
 +}
 diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
-index 7a8db1d8..6b2028e6 100644
+index 29b9d386..3bd1ef88 100644
 --- a/submodules/TelegramCore/Sources/Network/Network.swift
 +++ b/submodules/TelegramCore/Sources/Network/Network.swift
 @@ -1,4 +1,5 @@
@@ -515,9 +515,9 @@ index 7a8db1d8..6b2028e6 100644
 +import AyuGramSettings
  import WebProxyTransport
  import Postbox
- internal import TelegramApi
-@@ -1374,6 +1375,11 @@ public final class Network: NSObject {
-     func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
+ import TelegramApi
+@@ -1260,6 +1261,11 @@ public final class Network: NSObject {
+     public func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
          let requestService = self.requestService
          return Signal { [requestService] subscriber in
 +            // AyuGram ghost mode: the request completes without a result and never reaches the server.
@@ -528,8 +528,8 @@ index 7a8db1d8..6b2028e6 100644
              let request = NetworkEngineRequest(
                  payload: data.1.makeData(),
                  metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
-@@ -1420,6 +1426,11 @@ public final class Network: NSObject {
-     func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
+@@ -1306,6 +1312,11 @@ public final class Network: NSObject {
+     public func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
          let requestService = self.requestService
          return Signal { [requestService] subscriber in
 +            // AyuGram ghost mode: the request completes without a result and never reaches the server.
@@ -541,7 +541,7 @@ index 7a8db1d8..6b2028e6 100644
                  payload: data.1.makeData(),
                  metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
 diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
-index 3d99e59d..a1372c5c 100644
+index ba4569ed..44ac8a4f 100644
 --- a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
 +++ b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
 @@ -1,4 +1,5 @@
@@ -549,8 +549,8 @@ index 3d99e59d..a1372c5c 100644
 +import AyuGramSettings
  import Postbox
  import SwiftSignalKit
- internal import TelegramApi
-@@ -4622,6 +4623,17 @@ func replayFinalState(
+ import TelegramApi
+@@ -4597,6 +4598,17 @@ func replayFinalState(
              case let .DeleteEphemeralMessages(peerId, ids):
                  deleteEphemeralMessages(transaction: transaction, peerId: peerId, ids: ids)
              case let .DeleteMessagesWithGlobalIds(ids):
@@ -568,7 +568,7 @@ index 3d99e59d..a1372c5c 100644
                  var resourceIds: [MediaResourceId] = []
                  transaction.deleteMessagesWithGlobalIds(ids, forEachMedia: { media in
                      addMessageMediaResourceIdsToRemove(media: media, resourceIds: &resourceIds)
-@@ -4631,6 +4643,10 @@ func replayFinalState(
+@@ -4606,6 +4618,10 @@ func replayFinalState(
                  }
                  deletedMessageIds.append(contentsOf: ids.map { .global($0) })
              case let .DeleteMessages(ids):
@@ -579,12 +579,12 @@ index 3d99e59d..a1372c5c 100644
                  _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, manualAddMessageThreadStatsDifference: { id, add, remove in
                      addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
                  })
-@@ -4680,7 +4696,14 @@ func replayFinalState(
-                         generatedEvent = reactionGeneratedEvent(previousMessage.reactionsAttribute, message.reactionsAttribute, message: message, transaction: transaction)
+@@ -4689,7 +4705,14 @@ func replayFinalState(
+                         updatedMedia = previousMessage.media
                      }
                      
--                    return .update(mergedServerMessageUpdate(previous: previousMessage, updated: message))
-+                    var merged = mergedServerMessageUpdate(previous: previousMessage, updated: message)
+-                    return .update(message.withUpdatedLocalTags(updatedLocalTags).withUpdatedFlags(updatedFlags).withUpdatedAttributes(updatedAttributes).withUpdatedMedia(updatedMedia))
++                    var merged = message.withUpdatedLocalTags(updatedLocalTags).withUpdatedFlags(updatedFlags).withUpdatedAttributes(updatedAttributes).withUpdatedMedia(updatedMedia)
 +                    if AyuSettings.shared.values.saveMessagesHistory, let history = ayuEditHistory(previous: previousMessage, updated: merged) {
 +                        var attributes = merged.attributes
 +                        attributes.removeAll(where: { $0 is AyuEditHistoryMessageAttribute })
@@ -596,13 +596,13 @@ index 3d99e59d..a1372c5c 100644
                  if let generatedEvent = generatedEvent {
                      addedReactionEvents.append(generatedEvent)
 diff --git a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
-index 7256668b..8e218a73 100644
+index 8c8a4fa3..c30a128a 100644
 --- a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 +++ b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 @@ -1,4 +1,5 @@
  import Foundation
 +import AyuGramSettings
- internal import TelegramApi
+ import TelegramApi
  import Postbox
  import SwiftSignalKit
 @@ -53,11 +54,25 @@ private final class AccountPresenceManagerImpl {
@@ -658,7 +658,7 @@ index c4badf4e..f2f1280a 100644
          "//submodules/TelegramUIPreferences",
          "//submodules/TextFormat",
 diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
-index d7da5d10..19c3fde0 100644
+index 8d111582..4d5bf707 100644
 --- a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
 +++ b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
 @@ -1,4 +1,5 @@
@@ -667,7 +667,7 @@ index d7da5d10..19c3fde0 100644
  import LottieSettings
  import UIKit
  import AsyncDisplayKit
-@@ -5777,6 +5778,14 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
+@@ -5771,6 +5772,14 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
          }
      }
      
@@ -698,10 +698,10 @@ index ad79b915..bd75fbf3 100644
      return dateText
  }
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
-index 8c4a24b7..8818e7b1 100644
+index 2a64e794..5a1fc785 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
 +++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
-@@ -191,6 +191,7 @@ enum PeerInfoSettingsSection {
+@@ -185,6 +185,7 @@ enum PeerInfoSettingsSection {
      case emojiStatus
      case profileColor
      case powerSaving
@@ -710,7 +710,7 @@ index 8c4a24b7..8818e7b1 100644
      case profile
      case premiumManagement
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
-index f1c1917b..d98c3645 100644
+index ec998735..ffda22b5 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
 +++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
 @@ -278,6 +278,8 @@ extension PeerInfoScreenNode {
@@ -737,7 +737,7 @@ index a4873696..6d06a686 100644
          interaction.openSettings(.notificationsAndSounds)
      }))
 diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
-index 1ade8c01..435569b7 100644
+index 9694d716..468238be 100644
 --- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 +++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 @@ -1348,6 +1348,23 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
