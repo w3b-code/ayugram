@@ -682,6 +682,18 @@ index 1234d53b..7859f9ed 100644
      ],
      visibility = [
          "//visibility:public",
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index 817bd239..d9da3d9f 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1464,6 +1464,7 @@ public class Account {
+         self.managedOperationsDisposable.add(managedPeerTimestampAttributeOperations(network: self.network, postbox: self.postbox).start())
+         self.managedOperationsDisposable.add(managedPendingWalletTransferMessages(postbox: self.postbox).start())
+         self.managedOperationsDisposable.add(managedSynchronizeViewStoriesOperations(postbox: self.postbox, network: self.network, stateManager: self.stateManager).start())
++        self.managedOperationsDisposable.add(ayuManagedAutoOffline(postbox: self.postbox, network: self.network, accountPeerId: peerId).start())
+         self.managedOperationsDisposable.add(managedSynchronizePeerStoriesOperations(postbox: self.postbox, network: self.network, stateManager: self.stateManager).start())
+         self.managedOperationsDisposable.add(managedLocalTypingActivities(activities: self.localInputActivityManager.allActivities(), postbox: self.stateManager.postbox, network: self.stateManager.network, accountPeerId: self.stateManager.accountPeerId).start())
+         
 diff --git a/submodules/TelegramCore/Sources/Account/AccountManager.swift b/submodules/TelegramCore/Sources/Account/AccountManager.swift
 index a59eefd1..dbf1e3d0 100644
 --- a/submodules/TelegramCore/Sources/Account/AccountManager.swift
@@ -697,10 +709,10 @@ index a59eefd1..dbf1e3d0 100644
      declareEncodable(TelegramMediaStory.self, f: { TelegramMediaStory(decoder: $0) })
 diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
 new file mode 100644
-index 00000000..12b287a2
+index 00000000..82b1fdf8
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,254 @@
 +import Foundation
 +import AyuGramSettings
 +import Postbox
@@ -928,6 +940,33 @@ index 00000000..12b287a2
 +        }
 +    )).start()
 +}
++
++/// AyuGram's "automatic offline", as AyuGram Desktop does it: whenever the server shows the account
++/// online while "online" is hidden (after a sent message, say), "offline" goes out.
++func ayuManagedAutoOffline(postbox: Postbox, network: Network, accountPeerId: PeerId) -> Signal<Never, NoError> {
++    let isShownOnline = postbox.peerView(id: accountPeerId)
++    |> map { view -> Bool in
++        guard let presence = view.peerPresences[accountPeerId] as? TelegramUserPresence, case let .present(until) = presence.status else {
++            return false
++        }
++        return until > Int32(Date().timeIntervalSince1970)
++    }
++    |> distinctUntilChanged
++    let autoOffline = AyuSettings.shared.signal
++    |> map { $0.sendsOfflineAfterAction }
++    |> distinctUntilChanged
++    return combineLatest(isShownOnline, autoOffline)
++    |> mapToSignal { isShownOnline, autoOffline -> Signal<Never, NoError> in
++        guard isShownOnline && autoOffline else {
++            return .complete()
++        }
++        return network.request(Api.functions.account.updateStatus(offline: .boolTrue))
++        |> ignoreValues
++        |> `catch` { _ -> Signal<Never, NoError> in
++            return .complete()
++        }
++    }
++}
 diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
 index 29b9d386..08c8b5c7 100644
 --- a/submodules/TelegramCore/Sources/Network/Network.swift
@@ -1035,8 +1074,30 @@ index ba4569ed..44ac8a4f 100644
                  })
                  if let generatedEvent = generatedEvent {
                      addedReactionEvents.append(generatedEvent)
+diff --git a/submodules/TelegramCore/Sources/State/AccountViewTracker.swift b/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
+index f13c7f6b..a61ac56d 100644
+--- a/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
++++ b/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import Postbox
+ import SwiftSignalKit
+ import TelegramApi
+@@ -720,7 +721,10 @@ public final class AccountViewTracker {
+                             guard let peer = transaction.getPeer(peerId), let inputPeer = apiInputPeer(peer) else {
+                                 return .complete()
+                             }
+-                            return account.network.request(Api.functions.messages.getMessagesViews(peer: inputPeer, id: messageIds.map { $0.id }, increment: .boolTrue))
++                            // AyuGram ghost mode, as AyuGram Desktop does it: views are fetched without
++                            // being counted while read receipts are held back.
++                            let increment: Api.Bool = AyuSettings.shared.values.suppressesFunction("messages.readHistory") ? .boolFalse : .boolTrue
++                            return account.network.request(Api.functions.messages.getMessagesViews(peer: inputPeer, id: messageIds.map { $0.id }, increment: increment))
+                             |> map(Optional.init)
+                             |> `catch` { _ -> Signal<Api.messages.MessageViews?, NoError> in
+                                 return .single(nil)
 diff --git a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
-index 8c8a4fa3..7e3e4293 100644
+index 8c8a4fa3..7ac367de 100644
 --- a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 +++ b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 @@ -1,4 +1,5 @@
@@ -1087,15 +1148,17 @@ index 8c8a4fa3..7e3e4293 100644
          self.currentRequestDisposable.dispose()
          self.onlineTimer?.invalidate()
      }
-@@ -53,10 +77,22 @@ private final class AccountPresenceManagerImpl {
+@@ -53,10 +77,24 @@ private final class AccountPresenceManagerImpl {
              }, queue: self.queue)
              self.onlineTimer = timer
              timer.start()
 -            request = self.network.request(Api.functions.account.updateStatus(offline: .boolFalse))
 +            let ayuSettings = AyuSettings.shared.values
 +            if ayuSettings.suppressesOnline {
-+                // AyuGram ghost mode: "online" is never sent.
-+                request = .single(.boolTrue)
++                // AyuGram ghost mode, as AyuGram4A and AyuGram Desktop do it: the periodic "online"
++                // goes out as "offline", so an online status the server set by itself (after a sent
++                // message, say) ends within one period.
++                request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
 +            } else if ayuSettings.sendsOfflineAfterOnline {
 +                request = self.network.request(Api.functions.account.updateStatus(offline: .boolFalse))
 +                |> then(self.network.request(Api.functions.account.updateStatus(offline: .boolTrue)))
@@ -1150,6 +1213,27 @@ index 91c5c772..f547444f 100644
          },
          decodeMessageThreadInfo: { entry in
              guard let data = entry.get(MessageHistoryThreadData.self) else {
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/Polls.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/Polls.swift
+index 921ab283..37ffdfcf 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/Polls.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/Polls.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import TelegramApi
+ import Postbox
+ import SwiftSignalKit
+@@ -38,6 +39,10 @@ public enum RequestMessageSelectPollOptionError {
+ }
+ 
+ func _internal_requestMessageSelectPollOption(account: Account, messageId: MessageId, opaqueIdentifiers: [Data]) -> Signal<TelegramMediaPoll?, RequestMessageSelectPollOptionError> {
++    // AyuGram: a poll vote counts as an action for "read after action", as in AyuGram Desktop.
++    if !opaqueIdentifiers.isEmpty && AyuSettings.shared.values.marksReadAfterAction {
++        ayuMarkReadAfterAction(account: account, peerId: messageId.peerId)
++    }
+     return account.postbox.loadedPeerWithId(messageId.peerId)
+     |> take(1)
+     |> castError(RequestMessageSelectPollOptionError.self)
 diff --git a/submodules/TelegramPresentationData/BUILD b/submodules/TelegramPresentationData/BUILD
 index 75689afa..8ad0c9ba 100644
 --- a/submodules/TelegramPresentationData/BUILD
