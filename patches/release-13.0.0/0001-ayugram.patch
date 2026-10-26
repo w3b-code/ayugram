@@ -38,7 +38,7 @@ index 00000000..51b43fe9
 +)
 diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 new file mode 100644
-index 00000000..88452fe8
+index 00000000..7e808001
 --- /dev/null
 +++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 @@ -0,0 +1,258 @@
@@ -107,7 +107,7 @@ index 00000000..88452fe8
 +        sendOfflinePacketAfterOnline: true,
 +        markReadAfterAction: true,
 +        sendWithoutSound: .never,
-+        suggestGhostModeBeforeViewingStory: false,
++        suggestGhostModeBeforeViewingStory: true,
 +        displayGhostStatus: false,
 +        saveDeletedMessages: true,
 +        saveMessagesHistory: true,
@@ -1307,7 +1307,7 @@ index cca31821..bd0e98f9 100644
          "//submodules/ShareController",
          "//submodules/UndoUI",
 diff --git a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
-index d5bef944..43994e97 100644
+index d5bef944..3667c604 100644
 --- a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
 +++ b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
 @@ -1,4 +1,5 @@
@@ -1324,7 +1324,7 @@ index d5bef944..43994e97 100644
  import UndoUI
  import ReactionSelectionNode
  import EntityKeyboard
-@@ -2134,6 +2136,41 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
+@@ -2134,6 +2136,68 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
          self.supportedOrientations = ViewControllerSupportedOrientations(regularSize: .all, compactSize: [.portrait])
          
          self.context.sharedContext.hasPreloadBlockingContent.set(.single(true))
@@ -1338,6 +1338,22 @@ index d5bef944..43994e97 100644
 +    }
 +    
 +    private var ayuHoldsStoryReads = false
++    /// The ghost settings to put back when the stories close, if ghost mode was turned on only for them.
++    private var ayuGhostValuesToRestore: (ghostModeEnabled: Bool, sendReadStoryPackets: Bool)?
++    
++    private func ayuRestoreGhostMode() {
++        guard let previous = self.ayuGhostValuesToRestore else {
++            return
++        }
++        self.ayuGhostValuesToRestore = nil
++        // A view marked just before closing is still being sent; turn ghost mode off after it.
++        Queue.mainQueue().after(2.0, {
++            AyuSettings.shared.update { values in
++                values.ghostModeEnabled = previous.ghostModeEnabled
++                values.sendReadStoryPackets = previous.sendReadStoryPackets
++            }
++        })
++    }
 +    
 +    private func ayuReleaseStoryReads() {
 +        if self.ayuHoldsStoryReads {
@@ -1350,11 +1366,13 @@ index d5bef944..43994e97 100644
 +        guard self.ayuHoldsStoryReads else {
 +            return
 +        }
-+        let alert = textAlertController(context: self.context, title: "Режим призрака", text: "Включить режим призрака, чтобы автор не увидел ваш просмотр?", actions: [
++        let alert = textAlertController(context: self.context, title: "Режим призрака", text: "Включить режим призрака на время просмотра? Автор не увидит, что вы посмотрели историю. После закрытия историй режим выключится.", actions: [
 +            TextAlertAction(type: .genericAction, title: "Нет", action: { [weak self] in
 +                self?.ayuReleaseStoryReads()
 +            }),
 +            TextAlertAction(type: .defaultAction, title: "Включить", action: { [weak self] in
++                let current = AyuSettings.shared.values
++                self?.ayuGhostValuesToRestore = (current.ghostModeEnabled, current.sendReadStoryPackets)
 +                AyuSettings.shared.update { values in
 +                    values.ghostModeEnabled = true
 +                    values.sendReadStoryPackets = false
@@ -1362,19 +1380,29 @@ index d5bef944..43994e97 100644
 +                self?.ayuReleaseStoryReads()
 +            })
 +        ], dismissOnOutsideTap: false)
-+        self.present(alert, in: .window(.root))
++        // In this screen's own context: a window-level alert would sit under the stories.
++        self.present(alert, in: .current)
++    }
++    
++    override public func viewDidDisappear(_ animated: Bool) {
++        super.viewDidDisappear(animated)
++        
++        // AyuGram: the stories closed; ghost mode turned on for them goes back off.
++        self.ayuReleaseStoryReads()
++        self.ayuRestoreGhostMode()
      }
      
      required public init(coder aDecoder: NSCoder) {
-@@ -2143,6 +2180,7 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
+@@ -2143,6 +2207,8 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
      deinit {
          self.context.sharedContext.hasPreloadBlockingContent.set(.single(false))
          self.focusedItemPromise.set(.single(nil))
 +        self.ayuReleaseStoryReads()
++        self.ayuRestoreGhostMode()
      }
      
      override public func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
-@@ -2160,6 +2198,8 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
+@@ -2160,6 +2226,8 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
              if let componentView = self.node.hostView.componentView as? StoryContainerScreenComponent.View {
                  componentView.animateIn()
              }
