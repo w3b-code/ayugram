@@ -24,10 +24,10 @@ index 00000000..51b43fe9
 +)
 diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 new file mode 100644
-index 00000000..a0e331bf
+index 00000000..b0f87f9f
 --- /dev/null
 +++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,142 @@
 +import Foundation
 +import SwiftSignalKit
 +
@@ -50,6 +50,10 @@ index 00000000..a0e331bf
 +    public var saveMessagesHistory: Bool
 +    public var semiTransparentDeletedMessages: Bool
 +
++    // Interface.
++    public var disableAds: Bool
++    public var hideStories: Bool
++
 +    public static let `default` = AyuSettingsValues(
 +        ghostModeEnabled: false,
 +        sendReadMessagePackets: false,
@@ -59,11 +63,20 @@ index 00000000..a0e331bf
 +        sendOfflinePacketAfterOnline: true,
 +        saveDeletedMessages: true,
 +        saveMessagesHistory: true,
-+        semiTransparentDeletedMessages: true
++        semiTransparentDeletedMessages: true,
++        disableAds: true,
++        hideStories: false
 +    )
 +
-+    /// Whether `name` (a TL function name such as `messages.readHistory`) must not reach the server.
++    /// Whether `name` (a TL function name such as `messages.readHistory`) must not reach the server:
++    /// ad requests while ads are disabled, and the ghost mode packets.
 +    public func suppressesFunction(_ name: String) -> Bool {
++        switch name {
++        case "messages.getSponsoredMessages", "contacts.getSponsoredPeers":
++            return self.disableAds
++        default:
++            break
++        }
 +        guard self.ghostModeEnabled else {
 +            return false
 +        }
@@ -115,6 +128,8 @@ index 00000000..a0e331bf
 +        load("saveDeletedMessages", &values.saveDeletedMessages)
 +        load("saveMessagesHistory", &values.saveMessagesHistory)
 +        load("semiTransparentDeletedMessages", &values.semiTransparentDeletedMessages)
++        load("disableAds", &values.disableAds)
++        load("hideStories", &values.hideStories)
 +        self.current = values
 +        self.promise = ValuePromise(values, ignoreRepeated: true)
 +    }
@@ -149,8 +164,67 @@ index 00000000..a0e331bf
 +        store("saveDeletedMessages", updated.saveDeletedMessages)
 +        store("saveMessagesHistory", updated.saveMessagesHistory)
 +        store("semiTransparentDeletedMessages", updated.semiTransparentDeletedMessages)
++        store("disableAds", updated.disableAds)
++        store("hideStories", updated.hideStories)
 +
 +        self.promise.set(updated)
++    }
++}
+diff --git a/submodules/ChatListUI/BUILD b/submodules/ChatListUI/BUILD
+index 57d29e8e..94fbc122 100644
+--- a/submodules/ChatListUI/BUILD
++++ b/submodules/ChatListUI/BUILD
+@@ -18,6 +18,7 @@ swift_library(
+         "//submodules/Display:Display",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/TelegramPresentationData:TelegramPresentationData",
+         "//submodules/TelegramUIPreferences:TelegramUIPreferences",
+         "//submodules/AccountContext:AccountContext",
+diff --git a/submodules/ChatListUI/Sources/ChatListController.swift b/submodules/ChatListUI/Sources/ChatListController.swift
+index f0eea833..bbffcf76 100644
+--- a/submodules/ChatListUI/Sources/ChatListController.swift
++++ b/submodules/ChatListUI/Sources/ChatListController.swift
+@@ -1,5 +1,6 @@
+ import Foundation
+ import UIKit
++import AyuGramSettings
+ import Postbox
+ import SwiftSignalKit
+ import AsyncDisplayKit
+@@ -2184,7 +2185,7 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController
+             if self.previewing {
+                 self.storiesReady.set(.single(true))
+             } else {
+-                self.storySubscriptionsDisposable = (self.context.engine.messages.storySubscriptions(isHidden: self.location == .chatList(groupId: .archive))
++                self.storySubscriptionsDisposable = (ayuFilteredStorySubscriptions(self.context.engine.messages.storySubscriptions(isHidden: self.location == .chatList(groupId: .archive)))
+                 |> deliverOnMainQueue).startStrict(next: { [weak self] rawStorySubscriptions in
+                     guard let self else {
+                         return
+@@ -2244,7 +2245,7 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController
+                 })
+                 
+                 if case .chatList(.root) = self.location {
+-                    self.storyArchiveSubscriptionsDisposable = (self.context.engine.messages.storySubscriptions(isHidden: true)
++                    self.storyArchiveSubscriptionsDisposable = (ayuFilteredStorySubscriptions(self.context.engine.messages.storySubscriptions(isHidden: true))
+                     |> deliverOnMainQueue).startStrict(next: { [weak self] rawStoryArchiveSubscriptions in
+                         guard let self else {
+                             return
+@@ -7551,3 +7552,15 @@ public func resolveChatListNavigationTarget(navigationController: NavigationCont
+     
+     return nil
+ }
++
++/// AyuGram: with "hide stories" on, other people's stories leave the chat list header and the archive;
++/// the account's own item stays, so posting a story still works.
++private func ayuFilteredStorySubscriptions(_ signal: Signal<EngineStorySubscriptions, NoError>) -> Signal<EngineStorySubscriptions, NoError> {
++    return combineLatest(signal, AyuSettings.shared.signal)
++    |> map { subscriptions, settings -> EngineStorySubscriptions in
++        if settings.hideStories {
++            return EngineStorySubscriptions(accountItem: subscriptions.accountItem, items: [], hasMoreToken: nil)
++        }
++        return subscriptions
 +    }
 +}
 diff --git a/submodules/DebugSettingsUI/Sources/DebugController.swift b/submodules/DebugSettingsUI/Sources/DebugController.swift
@@ -203,10 +277,10 @@ index 32438133..45acd0c5 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..ee5feaac
+index 00000000..713d3cae
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,205 @@
 +import Foundation
 +import UIKit
 +import Display
@@ -230,6 +304,7 @@ index 00000000..ee5feaac
 +    case ghost
 +    case ghostOptions
 +    case saving
++    case interface
 +}
 +
 +private enum AyuGramSettingsEntry: ItemListNodeEntry {
@@ -251,6 +326,11 @@ index 00000000..ee5feaac
 +    case semiTransparent(Bool)
 +    case savingFooter
 +
++    case interfaceHeader
++    case disableAds(Bool)
++    case hideStories(Bool)
++    case interfaceFooter
++
 +    var section: ItemListSectionId {
 +        switch self {
 +        case .ghostHeader, .ghostEnabled, .ghostFooter:
@@ -259,6 +339,8 @@ index 00000000..ee5feaac
 +            return AyuGramSettingsSection.ghostOptions.rawValue
 +        case .savingHeader, .saveDeleted, .saveHistory, .semiTransparent, .savingFooter:
 +            return AyuGramSettingsSection.saving.rawValue
++        case .interfaceHeader, .disableAds, .hideStories, .interfaceFooter:
++            return AyuGramSettingsSection.interface.rawValue
 +        }
 +    }
 +
@@ -294,6 +376,14 @@ index 00000000..ee5feaac
 +            return 13
 +        case .savingFooter:
 +            return 14
++        case .interfaceHeader:
++            return 15
++        case .disableAds:
++            return 16
++        case .hideStories:
++            return 17
++        case .interfaceFooter:
++            return 18
 +        }
 +    }
 +
@@ -339,6 +429,14 @@ index 00000000..ee5feaac
 +            return toggle("Полупрозрачные удалённые", value, { $0.semiTransparentDeletedMessages = $1 })
 +        case .savingFooter:
 +            return ItemListTextItem(presentationData: presentationData, text: .plain("Удалённые сообщения остаются в чате с меткой 🗑. История правок открывается из меню сообщения. Всё хранится только на этом устройстве."), sectionId: self.section)
++        case .interfaceHeader:
++            return ItemListSectionHeaderItem(presentationData: presentationData, text: "ИНТЕРФЕЙС", sectionId: self.section)
++        case let .disableAds(value):
++            return toggle("Блокировать рекламу", value, { $0.disableAds = $1 })
++        case let .hideStories(value):
++            return toggle("Скрыть истории", value, { $0.hideStories = $1 })
++        case .interfaceFooter:
++            return ItemListTextItem(presentationData: presentationData, text: .plain("Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть."), sectionId: self.section)
 +        }
 +    }
 +}
@@ -363,6 +461,11 @@ index 00000000..ee5feaac
 +    entries.append(.saveHistory(values.saveMessagesHistory))
 +    entries.append(.semiTransparent(values.semiTransparentDeletedMessages))
 +    entries.append(.savingFooter)
++
++    entries.append(.interfaceHeader)
++    entries.append(.disableAds(values.disableAds))
++    entries.append(.hideStories(values.hideStories))
++    entries.append(.interfaceFooter)
 +    return entries
 +}
 +
