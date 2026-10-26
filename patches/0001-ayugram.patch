@@ -1,3 +1,17 @@
+diff --git a/Telegram/NotificationService/Sources/NotificationService.swift b/Telegram/NotificationService/Sources/NotificationService.swift
+index 7a7c87bd..37b4a731 100644
+--- a/Telegram/NotificationService/Sources/NotificationService.swift
++++ b/Telegram/NotificationService/Sources/NotificationService.swift
+@@ -2484,7 +2484,8 @@ private final class NotificationServiceHandler {
+                             Logger.shared.log("NotificationService \(episode)", "Will delete messages \(ids)")
+                             let mediaBox = stateManager.postbox.mediaBox
+                             let _ = (stateManager.postbox.transaction { transaction -> Void in
+-                                _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, deleteMedia: true)
++                                // AyuGram: keep the deleted messages, marked, instead of removing them.
++                                ayuDeleteMessagesFromPush(transaction: transaction, mediaBox: mediaBox, ids: ids)
+                             }
+                             |> deliverOn(strongSelf.queue)).start(completed: {
+                                 UNUserNotificationCenter.current().getDeliveredNotifications(completionHandler: { notifications in
 diff --git a/submodules/AyuGram/AyuGramSettings/BUILD b/submodules/AyuGram/AyuGramSettings/BUILD
 new file mode 100644
 index 00000000..51b43fe9
@@ -535,11 +549,12 @@ index a59eefd1..dbf1e3d0 100644
      declareEncodable(TelegramMediaStory.self, f: { TelegramMediaStory(decoder: $0) })
 diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
 new file mode 100644
-index 00000000..61533b3d
+index 00000000..da9b9b1c
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,139 @@
 +import Foundation
++import AyuGramSettings
 +import Postbox
 +
 +/// Marks a message the server deleted while AyuGram kept the local copy.
@@ -647,6 +662,16 @@ index 00000000..61533b3d
 +        })
 +    }
 +    return remaining
++}
++
++/// Deletes messages for a MESSAGE_DELETED push in the notification extension, which shares the
++/// app's database: the saved ones are marked deleted, as when the app itself gets the deletion.
++public func ayuDeleteMessagesFromPush(transaction: Transaction, mediaBox: MediaBox, ids: [MessageId]) {
++    var ids = ids
++    if AyuSettings.shared.values.saveDeletedMessages {
++        ids = ayuMarkMessagesDeleted(transaction: transaction, ids: ids)
++    }
++    _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, deleteMedia: true)
 +}
 +
 +/// The edit history after `previous` is replaced by `updated`, or nil when the text did not change.
