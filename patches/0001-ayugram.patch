@@ -153,6 +153,42 @@ index 00000000..a0e331bf
 +        self.promise.set(updated)
 +    }
 +}
+diff --git a/submodules/DebugSettingsUI/Sources/DebugController.swift b/submodules/DebugSettingsUI/Sources/DebugController.swift
+index aa772928..919d98e0 100644
+--- a/submodules/DebugSettingsUI/Sources/DebugController.swift
++++ b/submodules/DebugSettingsUI/Sources/DebugController.swift
+@@ -478,6 +478,31 @@ private enum DebugControllerEntry: ItemListNodeEntry {
+                         }
+                         arguments.getRootController()?.present(composeController, animated: true, completion: nil)
+                     }))
++                    // AyuGram: before login there is no "Via Telegram", and Mail may not be set up.
++                    items.append(ActionSheetButtonItem(title: "Share File", color: .accent, action: { [weak actionSheet] in
++                        actionSheet?.dismissAnimated()
++
++                        var rawLogData = Data()
++                        for (name, path) in logs {
++                            if !rawLogData.isEmpty {
++                                rawLogData.append("\n\n".data(using: .utf8)!)
++                            }
++                            rawLogData.append("------ File: \(name) ------\n".data(using: .utf8)!)
++                            if let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) {
++                                rawLogData.append(data)
++                            }
++                        }
++                        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Log-iOS-Full.txt")
++                        guard let _ = try? rawLogData.write(to: url, options: .atomic), let rootController = arguments.getRootController() else {
++                            return
++                        }
++                        let activityController = UIActivityViewController(activityItems: [url], applicationActivities: nil)
++                        if let popover = activityController.popoverPresentationController {
++                            popover.sourceView = rootController.view
++                            popover.sourceRect = CGRect(x: rootController.view.bounds.midX, y: rootController.view.bounds.midY, width: 0.0, height: 0.0)
++                        }
++                        rootController.present(activityController, animated: true, completion: nil)
++                    }))
+ 
+                     actionSheet.setItemGroups([ActionSheetItemGroup(items: items), ActionSheetItemGroup(items: [
+                         ActionSheetButtonItem(title: presentationData.strings.Common_Cancel, color: .accent, font: .bold, action: { [weak actionSheet] in
 diff --git a/submodules/SettingsUI/BUILD b/submodules/SettingsUI/BUILD
 index 32438133..45acd0c5 100644
 --- a/submodules/SettingsUI/BUILD
