@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       telegram_tag:
-        description: "Тег Telegram-iOS, к которому применяется патч"
-        default: "release-13.0.0"
+        description: "Тег Telegram-iOS (нужна папка patches/<тег>)"
+        default: "release-13.1.1"
         required: true
       runner:
-        description: "macOS-раннер (нужен самый свежий Xcode)"
-        default: "macos-26"
+        description: "Раннер: xcode-27 для 13.1.x, macos-26 для 13.0.0"
+        default: "xcode-27"
         required: true
   push:
     branches: [main]
@@ -18,11 +18,11 @@ on:
       - ".github/workflows/build.yml"
 
 env:
-  TELEGRAM_TAG: ${{ inputs.telegram_tag || 'release-13.0.0' }}
+  TELEGRAM_TAG: ${{ inputs.telegram_tag || 'release-13.1.1' }}
 
 jobs:
   build:
-    runs-on: ${{ inputs.runner || 'macos-26' }}
+    runs-on: ${{ inputs.runner || 'xcode-27' }}
     timeout-minutes: 360
 
     steps:
@@ -54,7 +54,11 @@ jobs:
       - name: Apply AyuGram patches
         working-directory: telegram
         run: |
-          for p in ../patches/*.patch; do
+          if ! ls ../patches/"$TELEGRAM_TAG"/*.patch >/dev/null 2>&1; then
+            echo "::error::Нет патча для $TELEGRAM_TAG: создайте patches/$TELEGRAM_TAG/ (scripts/make-patch.sh)."
+            exit 1
+          fi
+          for p in ../patches/"$TELEGRAM_TAG"/*.patch; do
             echo "Applying $p"
             git apply --whitespace=nowarn "$p"
           done

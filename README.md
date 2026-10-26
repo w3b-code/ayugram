@@ -4,8 +4,8 @@
 Функции взяты из разбора Android-сборки `vanilla-AyuGram-lite-20261005.apk`, подробности в
 [docs/APK_ANALYSIS.md](docs/APK_ANALYSIS.md).
 
-Репозиторий не содержит кода Telegram: в нём только патч к тегу `release-13.0.0`
-([patches/0001-ayugram.patch](patches/0001-ayugram.patch)). GitHub Actions скачивает Telegram-iOS,
+Репозиторий не содержит кода Telegram: в нём только патчи к тегам Telegram-iOS, по папке на тег
+([patches/release-13.1.1](patches/release-13.1.1), [patches/release-13.0.0](patches/release-13.0.0)). GitHub Actions скачивает Telegram-iOS,
 накладывает патч и собирает `.ipa`.
 
 ## Что умеет
@@ -55,11 +55,14 @@
 
 ### Если сборка падает на версии Xcode
 
-Telegram-iOS 13.0.0 рассчитан на Xcode 26.6 (`versions.json`), он есть на раннере `macos-26`.
-Workflow выбирает самый новый Xcode на раннере и передаёт `--overrideXcodeVersion`.
-Теги 13.1 и новее требуют Xcode 27.1 и API iOS 27.1: на `macos-26` они не собираются
-(`value of type 'UIView' has no member 'reservedRegions'`). Для них нужен раннер с Xcode 27
-(например `macos-27`, когда он появится на GitHub) и патч, перенесённый на этот тег.
+Каждый тег Telegram-iOS требует свой Xcode (`versions.json`). Workflow выбирает самый новый Xcode
+на раннере и передаёт `--overrideXcodeVersion`.
+- `release-13.1.1` (по умолчанию): Xcode 27.1, раннер `xcode-27`;
+- `release-13.0.0`: Xcode 26.6, раннер `macos-26`.
+
+На раннере со старым Xcode сборка новой версии падает на API iOS 27
+(`value of type 'UIView' has no member 'reservedRegions'`). Для нового тега нужен патч в
+`patches/<тег>/`: если старый не накладывается, его переносят, как описано ниже.
 
 ## Установка на iPhone
 
@@ -79,8 +82,8 @@ Workflow выбирает самый новый Xcode на раннере и п�
 ## Изменение патча
 
 ```sh
-git clone --depth 1 --branch release-13.0.0 https://github.com/TelegramMessenger/Telegram-iOS tg
-cd tg && git apply ../patches/0001-ayugram.patch
+git clone --depth 1 --branch release-13.1.1 https://github.com/TelegramMessenger/Telegram-iOS tg
+cd tg && git apply ../patches/release-13.1.1/0001-ayugram.patch
 # …правки…
 ../scripts/make-patch.sh .
 ```

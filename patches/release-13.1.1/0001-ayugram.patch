@@ -1,0 +1,1568 @@
+diff --git a/Telegram/NotificationService/Sources/NotificationService.swift b/Telegram/NotificationService/Sources/NotificationService.swift
+index 5a2e16b5..5f137cc9 100644
+--- a/Telegram/NotificationService/Sources/NotificationService.swift
++++ b/Telegram/NotificationService/Sources/NotificationService.swift
+@@ -2484,7 +2484,8 @@ private final class NotificationServiceHandler {
+                             Logger.shared.log("NotificationService \(episode)", "Will delete messages \(ids)")
+                             let mediaBox = stateManager.postbox.mediaBox
+                             let _ = (stateManager.postbox.transaction { transaction -> Void in
+-                                _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, deleteMedia: true)
++                                // AyuGram: keep the deleted messages, marked, instead of removing them.
++                                ayuDeleteMessagesFromPush(transaction: transaction, mediaBox: mediaBox, ids: ids)
+                             }
+                             |> deliverOn(strongSelf.queue)).start(completed: {
+                                 UNUserNotificationCenter.current().getDeliveredNotifications(completionHandler: { notifications in
+diff --git a/submodules/AyuGram/AyuGramSettings/BUILD b/submodules/AyuGram/AyuGramSettings/BUILD
+new file mode 100644
+index 00000000..51b43fe9
+--- /dev/null
++++ b/submodules/AyuGram/AyuGramSettings/BUILD
+@@ -0,0 +1,18 @@
++load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
++
++swift_library(
++    name = "AyuGramSettings",
++    module_name = "AyuGramSettings",
++    srcs = glob([
++        "Sources/**/*.swift",
++    ]),
++    copts = [
++        "-warnings-as-errors",
++    ],
++    deps = [
++        "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
++    ],
++    visibility = [
++        "//visibility:public",
++    ],
++)
+diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
+new file mode 100644
+index 00000000..88452fe8
+--- /dev/null
++++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
+@@ -0,0 +1,258 @@
++import Foundation
++import SwiftSignalKit
++
++/// How a peer's ID is shown in its profile.
++public enum AyuPeerIdFormat: Int32, Equatable {
++    case hidden = 0
++    /// The ID as the Telegram API has it.
++    case telegramApi = 1
++    /// The Bot API form: negative for groups, -100… for supergroups and channels.
++    case botApi = 2
++}
++
++/// When outgoing messages are sent without a notification sound.
++public enum AyuSendWithoutSound: Int32, Equatable {
++    case never = 0
++    case always = 1
++    case inGhostMode = 2
++}
++
++/// AyuGram options, shared by every account of the app (AyuGram4A keeps ghost options per account;
++/// here one set applies to all of them).
++///
++/// Read from TelegramCore's network and state queues on every request, so the values live in memory
++/// behind a lock and only writes touch `UserDefaults`.
++public struct AyuSettingsValues: Equatable {
++    // Ghost mode: each `send*` flag says whether that packet still goes to the server.
++    public var ghostModeEnabled: Bool
++    public var sendReadMessagePackets: Bool
++    public var sendReadStoryPackets: Bool
++    public var sendOnlinePackets: Bool
++    public var sendUploadProgress: Bool
++    public var sendOfflinePacketAfterOnline: Bool
++    /// Marks a chat read on the server when the user sends a message or a reaction there.
++    public var markReadAfterAction: Bool
++    public var sendWithoutSound: AyuSendWithoutSound
++    /// Offers to turn ghost mode on before stories open while story views would be sent.
++    public var suggestGhostModeBeforeViewingStory: Bool
++    public var displayGhostStatus: Bool
++
++    // Message saving.
++    public var saveDeletedMessages: Bool
++    public var saveMessagesHistory: Bool
++    public var semiTransparentDeletedMessages: Bool
++
++    // Interface.
++    public var disableAds: Bool
++    public var hideStories: Bool
++    /// Plays silence while the app is in the background, so iOS does not suspend it and the
++    /// connection stays up to catch deletions and edits.
++    public var keepAliveInBackground: Bool
++    public var peerIdFormat: AyuPeerIdFormat
++    /// 1.23K → 1,234.
++    public var disableNumberRounding: Bool
++    /// 12:34 → 12:34:56 in message times.
++    public var showMessageSeconds: Bool
++
++    public static let `default` = AyuSettingsValues(
++        ghostModeEnabled: false,
++        sendReadMessagePackets: false,
++        sendReadStoryPackets: false,
++        sendOnlinePackets: false,
++        sendUploadProgress: false,
++        sendOfflinePacketAfterOnline: true,
++        markReadAfterAction: true,
++        sendWithoutSound: .never,
++        suggestGhostModeBeforeViewingStory: false,
++        displayGhostStatus: false,
++        saveDeletedMessages: true,
++        saveMessagesHistory: true,
++        semiTransparentDeletedMessages: true,
++        disableAds: true,
++        hideStories: false,
++        keepAliveInBackground: false,
++        peerIdFormat: .botApi,
++        disableNumberRounding: false,
++        showMessageSeconds: false
++    )
++
++    /// Whether `name` (a TL function name such as `messages.readHistory`) must not reach the server:
++    /// ad requests while ads are disabled, and the ghost mode packets.
++    public func suppressesFunction(_ name: String) -> Bool {
++        switch name {
++        case "messages.getSponsoredMessages", "contacts.getSponsoredPeers":
++            return self.disableAds
++        default:
++            break
++        }
++        guard self.ghostModeEnabled else {
++            return false
++        }
++        switch name {
++        case "messages.readHistory", "channels.readHistory", "messages.readDiscussion", "messages.readSavedHistory", "messages.readMessageContents", "channels.readMessageContents", "messages.readEncryptedHistory":
++            return !self.sendReadMessagePackets
++        case "stories.readStories", "stories.incrementStoryViews":
++            return !self.sendReadStoryPackets
++        case "messages.setTyping", "messages.setEncryptedTyping":
++            return !self.sendUploadProgress
++        default:
++            return false
++        }
++    }
++
++    public var suppressesOnline: Bool {
++        return self.ghostModeEnabled && !self.sendOnlinePackets
++    }
++
++    public var sendsOfflineAfterOnline: Bool {
++        return self.ghostModeEnabled && self.sendOfflinePacketAfterOnline
++    }
++
++    public var suppressesReadStories: Bool {
++        return self.ghostModeEnabled && !self.sendReadStoryPackets
++    }
++
++    /// Whether a message or reaction the user sends should mark the chat read on the server.
++    public var marksReadAfterAction: Bool {
++        return self.ghostModeEnabled && !self.sendReadMessagePackets && self.markReadAfterAction
++    }
++
++    public var sendsWithoutSound: Bool {
++        switch self.sendWithoutSound {
++        case .never:
++            return false
++        case .always:
++            return true
++        case .inGhostMode:
++            return self.ghostModeEnabled
++        }
++    }
++
++    public var showsGhostStatus: Bool {
++        return self.ghostModeEnabled && self.displayGhostStatus
++    }
++}
++
++public final class AyuSettings {
++    public static let shared = AyuSettings()
++
++    private static let keyPrefix = "ayugram."
++
++    private let defaults: UserDefaults
++    private let lock = NSLock()
++    private var current: AyuSettingsValues
++    private var storyReadHolds: Int = 0
++    private let promise: ValuePromise<AyuSettingsValues>
++
++    private init() {
++        self.defaults = UserDefaults.standard
++        var values = AyuSettingsValues.default
++        func load(_ key: String, _ value: inout Bool) {
++            if let stored = UserDefaults.standard.object(forKey: AyuSettings.keyPrefix + key) as? Bool {
++                value = stored
++            }
++        }
++        func loadInt(_ key: String) -> Int32? {
++            return (UserDefaults.standard.object(forKey: AyuSettings.keyPrefix + key) as? NSNumber)?.int32Value
++        }
++        load("ghostModeEnabled", &values.ghostModeEnabled)
++        load("sendReadMessagePackets", &values.sendReadMessagePackets)
++        load("sendReadStoryPackets", &values.sendReadStoryPackets)
++        load("sendOnlinePackets", &values.sendOnlinePackets)
++        load("sendUploadProgress", &values.sendUploadProgress)
++        load("sendOfflinePacketAfterOnline", &values.sendOfflinePacketAfterOnline)
++        load("markReadAfterAction", &values.markReadAfterAction)
++        if let raw = loadInt("sendWithoutSound"), let value = AyuSendWithoutSound(rawValue: raw) {
++            values.sendWithoutSound = value
++        }
++        load("suggestGhostModeBeforeViewingStory", &values.suggestGhostModeBeforeViewingStory)
++        load("displayGhostStatus", &values.displayGhostStatus)
++        load("saveDeletedMessages", &values.saveDeletedMessages)
++        load("saveMessagesHistory", &values.saveMessagesHistory)
++        load("semiTransparentDeletedMessages", &values.semiTransparentDeletedMessages)
++        load("disableAds", &values.disableAds)
++        load("hideStories", &values.hideStories)
++        load("keepAliveInBackground", &values.keepAliveInBackground)
++        if let raw = loadInt("peerIdFormat"), let value = AyuPeerIdFormat(rawValue: raw) {
++            values.peerIdFormat = value
++        }
++        load("disableNumberRounding", &values.disableNumberRounding)
++        load("showMessageSeconds", &values.showMessageSeconds)
++        self.current = values
++        self.promise = ValuePromise(values, ignoreRepeated: true)
++    }
++
++    public var values: AyuSettingsValues {
++        self.lock.lock()
++        defer { self.lock.unlock() }
++        return self.current
++    }
++
++    public var signal: Signal<AyuSettingsValues, NoError> {
++        return self.promise.get()
++    }
++
++    /// The network filter: the settings' own rules, plus story views while a story screen waits for
++    /// the user's answer to the ghost mode suggestion.
++    public func suppressesFunction(_ name: String) -> Bool {
++        self.lock.lock()
++        let values = self.current
++        let holdsStoryReads = self.storyReadHolds > 0
++        self.lock.unlock()
++
++        if holdsStoryReads && (name == "stories.readStories" || name == "stories.incrementStoryViews") {
++            return true
++        }
++        return values.suppressesFunction(name)
++    }
++
++    /// Stops story views from reaching the server until `releaseStoryReads` is called.
++    public func holdStoryReads() {
++        self.lock.lock()
++        self.storyReadHolds += 1
++        self.lock.unlock()
++    }
++
++    public func releaseStoryReads() {
++        self.lock.lock()
++        self.storyReadHolds = max(0, self.storyReadHolds - 1)
++        self.lock.unlock()
++    }
++
++    public func update(_ f: (inout AyuSettingsValues) -> Void) {
++        self.lock.lock()
++        var updated = self.current
++        f(&updated)
++        self.current = updated
++        self.lock.unlock()
++
++        let defaults = self.defaults
++        func store(_ key: String, _ value: Bool) {
++            defaults.set(value, forKey: AyuSettings.keyPrefix + key)
++        }
++        func storeInt(_ key: String, _ value: Int32) {
++            defaults.set(NSNumber(value: value), forKey: AyuSettings.keyPrefix + key)
++        }
++        store("ghostModeEnabled", updated.ghostModeEnabled)
++        store("sendReadMessagePackets", updated.sendReadMessagePackets)
++        store("sendReadStoryPackets", updated.sendReadStoryPackets)
++        store("sendOnlinePackets", updated.sendOnlinePackets)
++        store("sendUploadProgress", updated.sendUploadProgress)
++        store("sendOfflinePacketAfterOnline", updated.sendOfflinePacketAfterOnline)
++        store("markReadAfterAction", updated.markReadAfterAction)
++        storeInt("sendWithoutSound", updated.sendWithoutSound.rawValue)
++        store("suggestGhostModeBeforeViewingStory", updated.suggestGhostModeBeforeViewingStory)
++        store("displayGhostStatus", updated.displayGhostStatus)
++        store("saveDeletedMessages", updated.saveDeletedMessages)
++        store("saveMessagesHistory", updated.saveMessagesHistory)
++        store("semiTransparentDeletedMessages", updated.semiTransparentDeletedMessages)
++        store("disableAds", updated.disableAds)
++        store("hideStories", updated.hideStories)
++        store("keepAliveInBackground", updated.keepAliveInBackground)
++        storeInt("peerIdFormat", updated.peerIdFormat.rawValue)
++        store("disableNumberRounding", updated.disableNumberRounding)
++        store("showMessageSeconds", updated.showMessageSeconds)
++
++        self.promise.set(updated)
++    }
++}
+diff --git a/submodules/ChatListUI/BUILD b/submodules/ChatListUI/BUILD
+index af464d40..5809a8ea 100644
+--- a/submodules/ChatListUI/BUILD
++++ b/submodules/ChatListUI/BUILD
+@@ -18,6 +18,7 @@ swift_library(
+         "//submodules/Display:Display",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/TelegramPresentationData:TelegramPresentationData",
+         "//submodules/TelegramUIPreferences:TelegramUIPreferences",
+         "//submodules/AccountContext:AccountContext",
+diff --git a/submodules/ChatListUI/Sources/ChatListController.swift b/submodules/ChatListUI/Sources/ChatListController.swift
+index 5bdff8a6..1e7f003c 100644
+--- a/submodules/ChatListUI/Sources/ChatListController.swift
++++ b/submodules/ChatListUI/Sources/ChatListController.swift
+@@ -1,5 +1,6 @@
+ import Foundation
+ import UIKit
++import AyuGramSettings
+ import Postbox
+ import SwiftSignalKit
+ import AsyncDisplayKit
+@@ -2185,7 +2186,7 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController
+             if self.previewing {
+                 self.storiesReady.set(.single(true))
+             } else {
+-                self.storySubscriptionsDisposable = (self.context.engine.messages.storySubscriptions(isHidden: self.location == .chatList(groupId: .archive))
++                self.storySubscriptionsDisposable = (ayuFilteredStorySubscriptions(self.context.engine.messages.storySubscriptions(isHidden: self.location == .chatList(groupId: .archive)))
+                 |> deliverOnMainQueue).startStrict(next: { [weak self] rawStorySubscriptions in
+                     guard let self else {
+                         return
+@@ -2245,7 +2246,7 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController
+                 })
+                 
+                 if case .chatList(.root) = self.location {
+-                    self.storyArchiveSubscriptionsDisposable = (self.context.engine.messages.storySubscriptions(isHidden: true)
++                    self.storyArchiveSubscriptionsDisposable = (ayuFilteredStorySubscriptions(self.context.engine.messages.storySubscriptions(isHidden: true))
+                     |> deliverOnMainQueue).startStrict(next: { [weak self] rawStoryArchiveSubscriptions in
+                         guard let self else {
+                             return
+@@ -6967,7 +6968,10 @@ private final class ChatListLocationContext {
+                     isReorderingTabs,
+                     peerStatus,
+                     parentController.updatedPresentationData.1,
+-                    storyPostingAvailable
++                    // AyuGram: also refresh the title when the ghost status changes.
++                    combineLatest(storyPostingAvailable, AyuSettings.shared.signal |> map { $0.showsGhostStatus } |> distinctUntilChanged) |> map { storyPostingAvailable, _ -> Bool in
++                        return storyPostingAvailable
++                    }
+                 ).startStrict(next: { [weak self] networkState, proxy, passcode, stateAndFilterId, isReorderingTabs, peerStatus, presentationData, storyPostingAvailable in
+                     guard let self else {
+                         return
+@@ -7214,7 +7218,8 @@ private final class ChatListLocationContext {
+         switch location {
+         case let .chatList(groupId):
+             if groupId == .root {
+-                defaultTitle = presentationData.strings.DialogList_Title
++                // AyuGram: "ghost status in the chat list".
++                defaultTitle = presentationData.strings.DialogList_Title + (AyuSettings.shared.values.showsGhostStatus ? " 👻" : "")
+             } else {
+                 defaultTitle = presentationData.strings.ChatList_ArchivedChatsTitle
+             }
+@@ -7606,3 +7611,15 @@ public func resolveChatListNavigationTarget(navigationController: NavigationCont
+     
+     return nil
+ }
++
++/// AyuGram: with "hide stories" on, other people's stories leave the chat list header and the archive;
++/// the account's own item stays, so posting a story still works.
++private func ayuFilteredStorySubscriptions(_ signal: Signal<EngineStorySubscriptions, NoError>) -> Signal<EngineStorySubscriptions, NoError> {
++    return combineLatest(signal, AyuSettings.shared.signal)
++    |> map { subscriptions, settings -> EngineStorySubscriptions in
++        if settings.hideStories {
++            return EngineStorySubscriptions(accountItem: subscriptions.accountItem, items: [], hasMoreToken: nil)
++        }
++        return subscriptions
++    }
++}
+diff --git a/submodules/DebugSettingsUI/Sources/DebugController.swift b/submodules/DebugSettingsUI/Sources/DebugController.swift
+index a0938222..34e8f4f1 100644
+--- a/submodules/DebugSettingsUI/Sources/DebugController.swift
++++ b/submodules/DebugSettingsUI/Sources/DebugController.swift
+@@ -1852,6 +1852,31 @@ private enum DebugControllerEntry: ItemListNodeEntry {
+                         }
+                         arguments.getRootController()?.present(composeController, animated: true, completion: nil)
+                     }))
++                    // AyuGram: before login there is no "Via Telegram", and Mail may not be set up.
++                    items.append(ActionSheetButtonItem(title: "Share File", color: .accent, action: { [weak actionSheet] in
++                        actionSheet?.dismissAnimated()
++
++                        var rawLogData = Data()
++                        for (name, path) in logs {
++                            if !rawLogData.isEmpty {
++                                rawLogData.append("\n\n".data(using: .utf8)!)
++                            }
++                            rawLogData.append("------ File: \(name) ------\n".data(using: .utf8)!)
++                            if let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) {
++                                rawLogData.append(data)
++                            }
++                        }
++                        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Log-iOS-Full.txt")
++                        guard let _ = try? rawLogData.write(to: url, options: .atomic), let rootController = arguments.getRootController() else {
++                            return
++                        }
++                        let activityController = UIActivityViewController(activityItems: [url], applicationActivities: nil)
++                        if let popover = activityController.popoverPresentationController {
++                            popover.sourceView = rootController.view
++                            popover.sourceRect = CGRect(x: rootController.view.bounds.midX, y: rootController.view.bounds.midY, width: 0.0, height: 0.0)
++                        }
++                        rootController.present(activityController, animated: true, completion: nil)
++                    }))
+ 
+                     actionSheet.setItemGroups([ActionSheetItemGroup(items: items), ActionSheetItemGroup(items: [
+                         ActionSheetButtonItem(title: presentationData.strings.Common_Cancel, color: .accent, font: .bold, action: { [weak actionSheet] in
+diff --git a/submodules/SettingsUI/BUILD b/submodules/SettingsUI/BUILD
+index 2b819a9c..0560b7dd 100644
+--- a/submodules/SettingsUI/BUILD
++++ b/submodules/SettingsUI/BUILD
+@@ -34,6 +34,7 @@ swift_library(
+         "//submodules/GalleryUI:GalleryUI",
+         "//submodules/Geocoding:Geocoding",
+         "//submodules/ItemListUI:ItemListUI",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/ItemListStickerPackItem:ItemListStickerPackItem",
+         "//submodules/ItemListPeerItem:ItemListPeerItem",
+         "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+new file mode 100644
+index 00000000..9078b3a5
+--- /dev/null
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+@@ -0,0 +1,231 @@
++import Foundation
++import UIKit
++import Display
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import ItemListUI
++import PresentationDataUtils
++import AccountContext
++import AyuGramSettings
++
++private final class AyuGramSettingsControllerArguments {
++    let update: ((inout AyuSettingsValues) -> Void) -> Void
++
++    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void) {
++        self.update = update
++    }
++}
++
++private enum AyuGramSettingsSection: Int32 {
++    case ghost
++    case ghostOptions
++    case ghostExtras
++    case sendWithoutSound
++    case saving
++    case interface
++    case peerId
++}
++
++/// A switch on the screen and the setting it changes.
++private enum AyuGramToggle: Equatable {
++    case ghostMode
++    case sendReadMessages
++    case sendReadStories
++    case sendOnline
++    case sendTyping
++    case sendOfflineAfterOnline
++    case markReadAfterAction
++    case suggestGhostForStories
++    case ghostStatusInChatList
++    case saveDeleted
++    case saveHistory
++    case semiTransparent
++    case keepAlive
++    case disableAds
++    case hideStories
++    case disableNumberRounding
++    case showMessageSeconds
++
++    func apply(_ values: inout AyuSettingsValues, _ value: Bool) {
++        switch self {
++        case .ghostMode:
++            values.ghostModeEnabled = value
++        case .sendReadMessages:
++            values.sendReadMessagePackets = value
++        case .sendReadStories:
++            values.sendReadStoryPackets = value
++        case .sendOnline:
++            values.sendOnlinePackets = value
++        case .sendTyping:
++            values.sendUploadProgress = value
++        case .sendOfflineAfterOnline:
++            values.sendOfflinePacketAfterOnline = value
++        case .markReadAfterAction:
++            values.markReadAfterAction = value
++        case .suggestGhostForStories:
++            values.suggestGhostModeBeforeViewingStory = value
++        case .ghostStatusInChatList:
++            values.displayGhostStatus = value
++        case .saveDeleted:
++            values.saveDeletedMessages = value
++        case .saveHistory:
++            values.saveMessagesHistory = value
++        case .semiTransparent:
++            values.semiTransparentDeletedMessages = value
++        case .keepAlive:
++            values.keepAliveInBackground = value
++        case .disableAds:
++            values.disableAds = value
++        case .hideStories:
++            values.hideStories = value
++        case .disableNumberRounding:
++            values.disableNumberRounding = value
++        case .showMessageSeconds:
++            values.showMessageSeconds = value
++        }
++    }
++}
++
++/// One option of a single-choice list.
++private enum AyuGramChoice: Equatable {
++    case sendWithoutSound(AyuSendWithoutSound)
++    case peerIdFormat(AyuPeerIdFormat)
++
++    func apply(_ values: inout AyuSettingsValues) {
++        switch self {
++        case let .sendWithoutSound(value):
++            values.sendWithoutSound = value
++        case let .peerIdFormat(value):
++            values.peerIdFormat = value
++        }
++    }
++}
++
++private enum AyuGramSettingsEntry: ItemListNodeEntry {
++    case header(id: Int32, section: AyuGramSettingsSection, text: String)
++    case toggle(id: Int32, section: AyuGramSettingsSection, toggle: AyuGramToggle, title: String, value: Bool, enabled: Bool)
++    case choice(id: Int32, section: AyuGramSettingsSection, choice: AyuGramChoice, title: String, checked: Bool)
++    case footer(id: Int32, section: AyuGramSettingsSection, text: String)
++
++    var section: ItemListSectionId {
++        switch self {
++        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _):
++            return section.rawValue
++        }
++    }
++
++    var stableId: Int32 {
++        switch self {
++        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _):
++            return id
++        }
++    }
++
++    static func <(lhs: AyuGramSettingsEntry, rhs: AyuGramSettingsEntry) -> Bool {
++        return lhs.stableId < rhs.stableId
++    }
++
++    func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
++        let arguments = arguments as! AyuGramSettingsControllerArguments
++        switch self {
++        case let .header(_, _, text):
++            return ItemListSectionHeaderItem(presentationData: presentationData, text: text, sectionId: self.section)
++        case let .toggle(_, _, toggle, title, value, enabled):
++            return ItemListSwitchItem(presentationData: presentationData, systemStyle: .glass, title: title, value: value, enabled: enabled, sectionId: self.section, style: .blocks, updated: { value in
++                arguments.update { toggle.apply(&$0, value) }
++            })
++        case let .choice(_, _, choice, title, checked):
++            return ItemListCheckboxItem(presentationData: presentationData, systemStyle: .glass, title: title, style: .left, checked: checked, zeroSeparatorInsets: false, sectionId: self.section, action: {
++                arguments.update { choice.apply(&$0) }
++            })
++        case let .footer(_, _, text):
++            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        }
++    }
++}
++
++private func ayuGramSettingsEntries(values: AyuSettingsValues) -> [AyuGramSettingsEntry] {
++    var entries: [AyuGramSettingsEntry] = []
++    var nextId: Int32 = 0
++    func add(_ make: (Int32) -> AyuGramSettingsEntry) {
++        entries.append(make(nextId))
++        nextId += 1
++    }
++    func toggle(_ section: AyuGramSettingsSection, _ toggle: AyuGramToggle, _ title: String, _ value: Bool, enabled: Bool = true) {
++        add { .toggle(id: $0, section: section, toggle: toggle, title: title, value: value, enabled: enabled) }
++    }
++    func header(_ section: AyuGramSettingsSection, _ text: String) {
++        add { .header(id: $0, section: section, text: text) }
++    }
++    func footer(_ section: AyuGramSettingsSection, _ text: String) {
++        add { .footer(id: $0, section: section, text: text) }
++    }
++    func choice(_ section: AyuGramSettingsSection, _ choice: AyuGramChoice, _ title: String, _ checked: Bool) {
++        add { .choice(id: $0, section: section, choice: choice, title: title, checked: checked) }
++    }
++
++    let ghost = values.ghostModeEnabled
++
++    header(.ghost, "РЕЖИМ ПРИЗРАКА")
++    toggle(.ghost, .ghostMode, "Режим призрака", ghost)
++    footer(.ghost, "Пока режим включён, сервер не узнаёт о действиях, которые выключены ниже.")
++
++    header(.ghostOptions, "ЧТО ОТПРАВЛЯТЬ")
++    toggle(.ghostOptions, .sendReadMessages, "Отметки о прочтении", values.sendReadMessagePackets, enabled: ghost)
++    toggle(.ghostOptions, .sendReadStories, "Просмотр историй", values.sendReadStoryPackets, enabled: ghost)
++    toggle(.ghostOptions, .sendOnline, "Статус «в сети»", values.sendOnlinePackets, enabled: ghost)
++    toggle(.ghostOptions, .sendTyping, "«Печатает…» и загрузка", values.sendUploadProgress, enabled: ghost)
++    toggle(.ghostOptions, .sendOfflineAfterOnline, "«Не в сети» после «в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost && values.sendOnlinePackets)
++    footer(.ghostOptions, "Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными.")
++
++    toggle(.ghostExtras, .markReadAfterAction, "Читать при действиях", values.markReadAfterAction, enabled: ghost)
++    toggle(.ghostExtras, .suggestGhostForStories, "Предлагать призрака для историй", values.suggestGhostModeBeforeViewingStory)
++    toggle(.ghostExtras, .ghostStatusInChatList, "Статус призрака в списке чатов", values.displayGhostStatus)
++    footer(.ghostExtras, "«Читать при действиях» отмечает чат прочитанным, когда вы отправляете в него сообщение или реакцию. Перед открытием историй можно получить предложение включить режим призрака. Статус призрака — 👻 рядом с заголовком «Чаты».")
++
++    header(.sendWithoutSound, "ОТПРАВЛЯТЬ БЕЗ ЗВУКА")
++    choice(.sendWithoutSound, .sendWithoutSound(.never), "Никогда", values.sendWithoutSound == .never)
++    choice(.sendWithoutSound, .sendWithoutSound(.always), "Всегда", values.sendWithoutSound == .always)
++    choice(.sendWithoutSound, .sendWithoutSound(.inGhostMode), "В режиме призрака", values.sendWithoutSound == .inGhostMode)
++
++    header(.saving, "СОХРАНЕНИЕ СООБЩЕНИЙ")
++    toggle(.saving, .saveDeleted, "Сохранять удалённые", values.saveDeletedMessages)
++    toggle(.saving, .saveHistory, "Сохранять историю правок", values.saveMessagesHistory)
++    toggle(.saving, .semiTransparent, "Полупрозрачные удалённые", values.semiTransparentDeletedMessages)
++    toggle(.saving, .keepAlive, "Держать в фоне", values.keepAliveInBackground)
++    footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑. История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить. «Держать в фоне» не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи). Закрытое смахиванием приложение не работает.")
++
++    header(.interface, "ИНТЕРФЕЙС")
++    toggle(.interface, .disableAds, "Блокировать рекламу", values.disableAds)
++    toggle(.interface, .hideStories, "Скрыть истории", values.hideStories)
++    toggle(.interface, .disableNumberRounding, "Отключить округление чисел", values.disableNumberRounding)
++    toggle(.interface, .showMessageSeconds, "Время с секундами", values.showMessageSeconds)
++    footer(.interface, "Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56.")
++
++    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
++    choice(.peerId, .peerIdFormat(.hidden), "Не показывать", values.peerIdFormat == .hidden)
++    choice(.peerId, .peerIdFormat(.telegramApi), "Telegram API", values.peerIdFormat == .telegramApi)
++    choice(.peerId, .peerIdFormat(.botApi), "Bot API", values.peerIdFormat == .botApi)
++    footer(.peerId, "ID показывается в профиле, нажатие копирует его. Telegram API показывает ID как есть, а Bot API добавляет минус для групп и -100 для супергрупп и каналов. DC — дата-центр фото профиля.")
++
++    return entries
++}
++
++public func ayuGramSettingsController(context: AccountContext) -> ViewController {
++    let arguments = AyuGramSettingsControllerArguments(update: { f in
++        AyuSettings.shared.update(f)
++    })
++
++    let signal = combineLatest(queue: .mainQueue(),
++        context.sharedContext.presentationData,
++        AyuSettings.shared.signal
++    )
++    |> map { presentationData, values -> (ItemListControllerState, (ItemListNodeState, Any)) in
++        let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text("AyuGram"), leftNavigationButton: nil, rightNavigationButton: nil, backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back))
++        let listState = ItemListNodeState(presentationData: ItemListPresentationData(presentationData), entries: ayuGramSettingsEntries(values: values), style: .blocks, animateChanges: true)
++        return (controllerState, (listState, arguments))
++    }
++
++    return ItemListController(context: context, state: signal)
++}
+diff --git a/submodules/TelegramCore/BUILD b/submodules/TelegramCore/BUILD
+index d4ed7767..144950c6 100644
+--- a/submodules/TelegramCore/BUILD
++++ b/submodules/TelegramCore/BUILD
+@@ -30,6 +30,7 @@ swift_library(
+         "//submodules/TelegramCore/FlatBuffers",
+         "//submodules/TelegramCore/FlatSerialization",
+         "//submodules/MurMurHash32",
++        "//submodules/AyuGram/AyuGramSettings",
+     ],
+     visibility = [
+         "//visibility:public",
+diff --git a/submodules/TelegramCore/Sources/Account/AccountManager.swift b/submodules/TelegramCore/Sources/Account/AccountManager.swift
+index bf906980..ee03f18a 100644
+--- a/submodules/TelegramCore/Sources/Account/AccountManager.swift
++++ b/submodules/TelegramCore/Sources/Account/AccountManager.swift
+@@ -222,6 +222,8 @@ private var declaredEncodables: Void = {
+     declareEncodable(MediaSpoilerMessageAttribute.self, f: { MediaSpoilerMessageAttribute(decoder: $0) })
+     declareEncodable(AuthSessionInfoAttribute.self, f: { AuthSessionInfoAttribute(decoder: $0) })
+     declareEncodable(TranslationMessageAttribute.self, f: { TranslationMessageAttribute(decoder: $0) })
++    declareEncodable(AyuDeletedMessageAttribute.self, f: { AyuDeletedMessageAttribute(decoder: $0) })
++    declareEncodable(AyuEditHistoryMessageAttribute.self, f: { AyuEditHistoryMessageAttribute(decoder: $0) })
+     declareEncodable(TranslationMessageAttribute.Additional.self, f: { TranslationMessageAttribute.Additional(decoder: $0) })
+     declareEncodable(SynchronizeAutosaveItemOperation.self, f: { SynchronizeAutosaveItemOperation(decoder: $0) })
+     declareEncodable(TelegramMediaStory.self, f: { TelegramMediaStory(decoder: $0) })
+diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+new file mode 100644
+index 00000000..5645a2f5
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+@@ -0,0 +1,209 @@
++import Foundation
++import AyuGramSettings
++import Postbox
++import SwiftSignalKit
++internal import TelegramApi
++
++/// Marks a message the server deleted while AyuGram kept the local copy.
++///
++/// Kept across later updates of the message by `mergeMessageAttributes`.
++public final class AyuDeletedMessageAttribute: MessageAttribute {
++    public let deletedAt: Int32
++
++    public init(deletedAt: Int32) {
++        self.deletedAt = deletedAt
++    }
++
++    required public init(decoder: PostboxDecoder) {
++        self.deletedAt = decoder.decodeInt32ForKey("d", orElse: 0)
++    }
++
++    public func encode(_ encoder: PostboxEncoder) {
++        encoder.encodeInt32(self.deletedAt, forKey: "d")
++    }
++}
++
++/// The earlier texts of an edited message, oldest first.
++///
++/// Kept across later updates of the message by `mergeMessageAttributes`.
++public final class AyuEditHistoryMessageAttribute: MessageAttribute {
++    public struct Revision: Equatable {
++        public let text: String
++        /// When this text was posted: the message date for the first revision, the edit date after.
++        public let date: Int32
++
++        public init(text: String, date: Int32) {
++            self.text = text
++            self.date = date
++        }
++    }
++
++    public let revisions: [Revision]
++
++    public init(revisions: [Revision]) {
++        self.revisions = revisions
++    }
++
++    required public init(decoder: PostboxDecoder) {
++        let texts = decoder.decodeStringArrayForKey("t")
++        let dates = decoder.decodeInt32ArrayForKey("d")
++        var revisions: [Revision] = []
++        for i in 0 ..< min(texts.count, dates.count) {
++            revisions.append(Revision(text: texts[i], date: dates[i]))
++        }
++        self.revisions = revisions
++    }
++
++    public func encode(_ encoder: PostboxEncoder) {
++        encoder.encodeStringArray(self.revisions.map(\.text), forKey: "t")
++        encoder.encodeInt32Array(self.revisions.map(\.date), forKey: "d")
++    }
++
++    public func withAppended(_ revision: Revision) -> AyuEditHistoryMessageAttribute {
++        return AyuEditHistoryMessageAttribute(revisions: self.revisions + [revision])
++    }
++}
++
++extension Message {
++    public var ayuDeletedAttribute: AyuDeletedMessageAttribute? {
++        return self.attributes.first(where: { $0 is AyuDeletedMessageAttribute }) as? AyuDeletedMessageAttribute
++    }
++
++    public var ayuEditHistoryAttribute: AyuEditHistoryMessageAttribute? {
++        return self.attributes.first(where: { $0 is AyuEditHistoryMessageAttribute }) as? AyuEditHistoryMessageAttribute
++    }
++}
++
++/// Keeps AyuGram's attributes when Postbox replaces a message's attributes with the server's copy.
++func ayuMergeMessageAttributes(_ previous: [MessageAttribute], _ updated: inout [MessageAttribute]) {
++    if let deleted = previous.first(where: { $0 is AyuDeletedMessageAttribute }), !updated.contains(where: { $0 is AyuDeletedMessageAttribute }) {
++        updated.append(deleted)
++    }
++    if let history = previous.first(where: { $0 is AyuEditHistoryMessageAttribute }), !updated.contains(where: { $0 is AyuEditHistoryMessageAttribute }) {
++        updated.append(history)
++    }
++}
++
++/// Marks the stored messages among `ids` as deleted instead of removing them.
++///
++/// Returns the ids that must still be deleted the usual way: those not stored, and local or
++/// scheduled messages, which are not chat history.
++func ayuMarkMessagesDeleted(transaction: Transaction, ids: [MessageId]) -> [MessageId] {
++    let timestamp = Int32(Date().timeIntervalSince1970)
++    var remaining: [MessageId] = []
++    for id in ids {
++        guard id.namespace == Namespaces.Message.Cloud, let message = transaction.getMessage(id) else {
++            remaining.append(id)
++            continue
++        }
++        if message.ayuDeletedAttribute != nil {
++            continue
++        }
++        transaction.updateMessage(id, update: { current in
++            var attributes = current.attributes
++            attributes.append(AyuDeletedMessageAttribute(deletedAt: timestamp))
++            let storeForwardInfo = current.forwardInfo.flatMap { forwardInfo in
++                StoreMessageForwardInfo(authorId: forwardInfo.author?.id, sourceId: forwardInfo.source?.id, sourceMessageId: forwardInfo.sourceMessageId, date: forwardInfo.date, authorSignature: forwardInfo.authorSignature, psaType: forwardInfo.psaType, flags: forwardInfo.flags)
++            }
++            return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: current.tags, globalTags: current.globalTags, localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: attributes, media: current.media))
++        })
++    }
++    return remaining
++}
++
++/// Deletes messages for a MESSAGE_DELETED push in the notification extension, which shares the
++/// app's database: the saved ones are marked deleted, as when the app itself gets the deletion.
++public func ayuDeleteMessagesFromPush(transaction: Transaction, mediaBox: MediaBox, ids: [MessageId]) {
++    var ids = ids
++    if AyuSettings.shared.values.saveDeletedMessages {
++        ids = ayuMarkMessagesDeleted(transaction: transaction, ids: ids)
++    }
++    _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, deleteMedia: true)
++}
++
++/// The edit history after `previous` is replaced by `updated`, or nil when the text did not change.
++func ayuEditHistory(previous: Message, updated: StoreMessage) -> AyuEditHistoryMessageAttribute? {
++    if previous.text == updated.text || previous.text.isEmpty {
++        return nil
++    }
++    var editDate = previous.timestamp
++    for attribute in previous.attributes {
++        if let attribute = attribute as? EditedMessageAttribute {
++            editDate = attribute.date
++        }
++    }
++    let revision = AyuEditHistoryMessageAttribute.Revision(text: previous.text, date: editDate)
++    if let history = previous.ayuEditHistoryAttribute {
++        return history.withAppended(revision)
++    } else {
++        return AyuEditHistoryMessageAttribute(revisions: [revision])
++    }
++}
++
++/// Applies AyuGram's sending options to messages the user is about to send to `peerId`.
++func ayuPrepareOutgoingMessages(account: Account, peerId: PeerId, messages: [EnqueueMessage]) -> [EnqueueMessage] {
++    let settings = AyuSettings.shared.values
++    if settings.marksReadAfterAction {
++        ayuMarkReadAfterAction(account: account, peerId: peerId)
++    }
++    guard settings.sendsWithoutSound else {
++        return messages
++    }
++    return messages.map { message in
++        return message.withUpdatedAttributes { attributes in
++            var attributes = attributes
++            var flags: NotificationInfoMessageAttributeFlags = .muted
++            if let index = attributes.firstIndex(where: { $0 is NotificationInfoMessageAttribute }), let current = attributes[index] as? NotificationInfoMessageAttribute {
++                flags.formUnion(current.flags)
++                attributes.remove(at: index)
++            }
++            attributes.append(NotificationInfoMessageAttribute(flags: flags))
++            return attributes
++        }
++    }
++}
++
++/// Ghost mode's "read after action": reports the chat read up to its newest message, bypassing the
++/// filter that holds back the read packets.
++func ayuMarkReadAfterAction(account: Account, peerId: PeerId) {
++    guard peerId.namespace == Namespaces.Peer.CloudUser || peerId.namespace == Namespaces.Peer.CloudGroup || peerId.namespace == Namespaces.Peer.CloudChannel else {
++        return
++    }
++    let network = account.network
++    let _ = (account.postbox.transaction { transaction -> (Peer?, Int32?) in
++        return (transaction.getPeer(peerId), transaction.getTopPeerMessageId(peerId: peerId, namespace: Namespaces.Message.Cloud)?.id)
++    }
++    |> mapToSignal { peer, maxId -> Signal<Never, NoError> in
++        guard let peer = peer, let maxId = maxId else {
++            return .complete()
++        }
++        if peerId.namespace == Namespaces.Peer.CloudChannel {
++            guard let inputChannel = apiInputChannel(peer) else {
++                return .complete()
++            }
++            return network.request(Api.functions.channels.readHistory(channel: inputChannel, maxId: maxId), ayuBypass: true)
++            |> ignoreValues
++            |> `catch` { _ -> Signal<Never, NoError> in
++                return .complete()
++            }
++        } else {
++            guard let inputPeer = apiInputPeer(peer) else {
++                return .complete()
++            }
++            return network.request(Api.functions.messages.readHistory(peer: inputPeer, maxId: maxId), ayuBypass: true)
++            |> map(Optional.init)
++            |> `catch` { _ -> Signal<Api.messages.AffectedMessages?, NoError> in
++                return .single(nil)
++            }
++            |> mapToSignal { result -> Signal<Never, NoError> in
++                if let result = result {
++                    switch result {
++                    case let .affectedMessages(affectedMessagesData):
++                        account.stateManager?.addUpdateGroups([.updatePts(pts: affectedMessagesData.pts, ptsCount: affectedMessagesData.ptsCount)])
++                    }
++                }
++                return .complete()
++            }
++        }
++    }).start()
++}
+diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
+index 7a8db1d8..ed08fb1e 100644
+--- a/submodules/TelegramCore/Sources/Network/Network.swift
++++ b/submodules/TelegramCore/Sources/Network/Network.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import WebProxyTransport
+ import Postbox
+ internal import TelegramApi
+@@ -1374,6 +1375,11 @@ public final class Network: NSObject {
+     func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
+         let requestService = self.requestService
+         return Signal { [requestService] subscriber in
++            // AyuGram ghost mode: the request completes without a result and never reaches the server.
++            if AyuSettings.shared.suppressesFunction(data.0.name) {
++                subscriber.putCompletion()
++                return EmptyDisposable
++            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+@@ -1417,9 +1423,15 @@ public final class Network: NSObject {
+         }
+     }
+     
+-    func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
++    func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil, ayuBypass: Bool = false) -> Signal<T, MTRpcError> {
+         let requestService = self.requestService
+         return Signal { [requestService] subscriber in
++            // AyuGram ghost mode: the request completes without a result and never reaches the server.
++            // `ayuBypass` lets AyuGram's own "read after action" through.
++            if !ayuBypass && AyuSettings.shared.suppressesFunction(data.0.name) {
++                subscriber.putCompletion()
++                return EmptyDisposable
++            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+diff --git a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
+index 9cb3108a..d73f98a5 100644
+--- a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
++++ b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
+@@ -728,6 +728,8 @@ private func opportunisticallyTransformOutgoingMedia(network: Network, postbox:
+ }
+ 
+ public func enqueueMessages(account: Account, peerId: PeerId, messages: [EnqueueMessage]) -> Signal<[MessageId?], NoError> {
++    // AyuGram: send without sound, read after action.
++    let messages = ayuPrepareOutgoingMessages(account: account, peerId: peerId, messages: messages)
+     let signal: Signal<[(Bool, EnqueueMessage)], NoError>
+     if let transformOutgoingMessageMedia = account.transformOutgoingMessageMedia {
+         signal = opportunisticallyTransformOutgoingMedia(network: account.network, postbox: account.postbox, transformOutgoingMessageMedia: transformOutgoingMessageMedia, messages: messages, userInteractive: true)
+diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+index 3d99e59d..a1372c5c 100644
+--- a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
++++ b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import Postbox
+ import SwiftSignalKit
+ internal import TelegramApi
+@@ -4622,6 +4623,17 @@ func replayFinalState(
+             case let .DeleteEphemeralMessages(peerId, ids):
+                 deleteEphemeralMessages(transaction: transaction, peerId: peerId, ids: ids)
+             case let .DeleteMessagesWithGlobalIds(ids):
++                if AyuSettings.shared.values.saveDeletedMessages {
++                    let messageIds = transaction.messageIdsForGlobalIds(ids)
++                    let remaining = ayuMarkMessagesDeleted(transaction: transaction, ids: messageIds)
++                    if !remaining.isEmpty {
++                        _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: remaining, manualAddMessageThreadStatsDifference: { id, add, remove in
++                            addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
++                        })
++                    }
++                    deletedMessageIds.append(contentsOf: remaining.map { .messageId($0) })
++                    break
++                }
+                 var resourceIds: [MediaResourceId] = []
+                 transaction.deleteMessagesWithGlobalIds(ids, forEachMedia: { media in
+                     addMessageMediaResourceIdsToRemove(media: media, resourceIds: &resourceIds)
+@@ -4631,6 +4643,10 @@ func replayFinalState(
+                 }
+                 deletedMessageIds.append(contentsOf: ids.map { .global($0) })
+             case let .DeleteMessages(ids):
++                var ids = ids
++                if AyuSettings.shared.values.saveDeletedMessages {
++                    ids = ayuMarkMessagesDeleted(transaction: transaction, ids: ids)
++                }
+                 _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, manualAddMessageThreadStatsDifference: { id, add, remove in
+                     addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
+                 })
+@@ -4680,7 +4696,14 @@ func replayFinalState(
+                         generatedEvent = reactionGeneratedEvent(previousMessage.reactionsAttribute, message.reactionsAttribute, message: message, transaction: transaction)
+                     }
+                     
+-                    return .update(mergedServerMessageUpdate(previous: previousMessage, updated: message))
++                    var merged = mergedServerMessageUpdate(previous: previousMessage, updated: message)
++                    if AyuSettings.shared.values.saveMessagesHistory, let history = ayuEditHistory(previous: previousMessage, updated: merged) {
++                        var attributes = merged.attributes
++                        attributes.removeAll(where: { $0 is AyuEditHistoryMessageAttribute })
++                        attributes.append(history)
++                        merged = merged.withUpdatedAttributes(attributes)
++                    }
++                    return .update(merged)
+                 })
+                 if let generatedEvent = generatedEvent {
+                     addedReactionEvents.append(generatedEvent)
+diff --git a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
+index 7256668b..8e218a73 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ internal import TelegramApi
+ import Postbox
+ import SwiftSignalKit
+@@ -53,11 +54,25 @@ private final class AccountPresenceManagerImpl {
+             }, queue: self.queue)
+             self.onlineTimer = timer
+             timer.start()
+-            request = self.network.request(Api.functions.account.updateStatus(offline: .boolFalse))
++            let ayuSettings = AyuSettings.shared.values
++            if ayuSettings.suppressesOnline {
++                // AyuGram ghost mode: no status at all, since going offline would also update "last seen".
++                request = .single(.boolTrue)
++            } else if ayuSettings.sendsOfflineAfterOnline {
++                request = self.network.request(Api.functions.account.updateStatus(offline: .boolFalse))
++                |> then(self.network.request(Api.functions.account.updateStatus(offline: .boolTrue)))
++            } else {
++                request = self.network.request(Api.functions.account.updateStatus(offline: .boolFalse))
++            }
+         } else {
+             self.onlineTimer?.invalidate()
+             self.onlineTimer = nil
+-            request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
++            if AyuSettings.shared.values.suppressesOnline {
++                // AyuGram ghost mode: "offline" would also move "last seen" to now.
++                request = .single(.boolTrue)
++            } else {
++                request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
++            }
+         }
+         self.isPerformingUpdate.set(true)
+         self.currentRequestDisposable.set((request
+diff --git a/submodules/TelegramCore/Sources/State/MessageReactions.swift b/submodules/TelegramCore/Sources/State/MessageReactions.swift
+index b1a5ae4e..6fefa2d5 100644
+--- a/submodules/TelegramCore/Sources/State/MessageReactions.swift
++++ b/submodules/TelegramCore/Sources/State/MessageReactions.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import Postbox
+ import SwiftSignalKit
+ internal import TelegramApi
+@@ -22,6 +23,10 @@ public enum UpdateMessageReaction {
+ }
+ 
+ public func updateMessageReactionsInteractively(account: Account, messageIds: [MessageId], reactions: [UpdateMessageReaction], isLarge: Bool, storeAsRecentlyUsed: Bool, add: Bool = false) -> Signal<Never, NoError> {
++    // AyuGram: a reaction counts as an action for "read after action".
++    if !reactions.isEmpty, let peerId = messageIds.first?.peerId, AyuSettings.shared.values.marksReadAfterAction {
++        ayuMarkReadAfterAction(account: account, peerId: peerId)
++    }
+     return account.postbox.transaction { transaction -> Void in
+         guard let chatPeerId = messageIds.first?.peerId else {
+             return
+diff --git a/submodules/TelegramCore/Sources/SyncCore/SyncCore_StandaloneAccountTransaction.swift b/submodules/TelegramCore/Sources/SyncCore/SyncCore_StandaloneAccountTransaction.swift
+index 91c5c772..f547444f 100644
+--- a/submodules/TelegramCore/Sources/SyncCore/SyncCore_StandaloneAccountTransaction.swift
++++ b/submodules/TelegramCore/Sources/SyncCore/SyncCore_StandaloneAccountTransaction.swift
+@@ -187,6 +187,7 @@ public let telegramPostboxSeedConfiguration: SeedConfiguration = {
+             if let previousEphemeralReplacement, !updated.contains(where: { $0 is EphemeralReplacementMessageAttribute }) {
+                 updated.append(previousEphemeralReplacement)
+             }
++            ayuMergeMessageAttributes(previous, &updated)
+         },
+         decodeMessageThreadInfo: { entry in
+             guard let data = entry.get(MessageHistoryThreadData.self) else {
+diff --git a/submodules/TelegramPresentationData/BUILD b/submodules/TelegramPresentationData/BUILD
+index 75689afa..8ad0c9ba 100644
+--- a/submodules/TelegramPresentationData/BUILD
++++ b/submodules/TelegramPresentationData/BUILD
+@@ -11,6 +11,7 @@ swift_library(
+     ],
+     deps = [
+         "//submodules/TelegramCore:TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/Postbox:Postbox",
+         "//submodules/Display:Display",
+         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
+diff --git a/submodules/TelegramPresentationData/Sources/NumericFormat.swift b/submodules/TelegramPresentationData/Sources/NumericFormat.swift
+index 702bf96d..45fd7f8e 100644
+--- a/submodules/TelegramPresentationData/Sources/NumericFormat.swift
++++ b/submodules/TelegramPresentationData/Sources/NumericFormat.swift
+@@ -1,8 +1,21 @@
+ import Foundation
++import AyuGramSettings
+ import PresentationStrings
+ import TelegramCore
+ 
++private let ayuGroupedNumberFormatter: NumberFormatter = {
++    let formatter = NumberFormatter()
++    formatter.numberStyle = .decimal
++    formatter.groupingSeparator = ","
++    formatter.usesGroupingSeparator = true
++    return formatter
++}()
++
+ public func compactNumericCountString(_ count: Int, decimalSeparator: String = ".", showDecimalPart: Bool = true) -> String {
++    // AyuGram: "disable number rounding" shows 1,234 instead of 1.2K.
++    if count >= 1000 && AyuSettings.shared.values.disableNumberRounding {
++        return ayuGroupedNumberFormatter.string(from: NSNumber(value: count)) ?? "\(count)"
++    }
+     if count >= 1000 * 1000 {
+         let remainder = (count % (1000 * 1000)) / (1000 * 100)
+         if remainder != 0 && showDecimalPart {
+diff --git a/submodules/TelegramUI/BUILD b/submodules/TelegramUI/BUILD
+index 75245702..f43f3004 100644
+--- a/submodules/TelegramUI/BUILD
++++ b/submodules/TelegramUI/BUILD
+@@ -72,6 +72,7 @@ swift_library(
+         "//submodules/Display:Display",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/WebProxyTransport:WebProxyTransport",
+         "//submodules/MtProtoKit:MtProtoKit",
+         "//submodules/TelegramPresentationData:TelegramPresentationData",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
+index c4badf4e..f2f1280a 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
+@@ -16,6 +16,7 @@ swift_library(
+         "//submodules/SSignalKit/SwiftSignalKit",
+         "//submodules/Postbox",
+         "//submodules/TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/TelegramPresentationData",
+         "//submodules/TelegramUIPreferences",
+         "//submodules/TextFormat",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
+index d7da5d10..19c3fde0 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import LottieSettings
+ import UIKit
+ import AsyncDisplayKit
+@@ -5777,6 +5778,14 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
+         }
+     }
+     
++    override public func setupItem(_ item: ChatMessageItem, synchronousLoad: Bool) {
++        super.setupItem(item, synchronousLoad: synchronousLoad)
++        
++        // AyuGram: a message the server deleted stays in the chat, dimmed.
++        let isDeleted = AyuSettings.shared.values.semiTransparentDeletedMessages && item.content.firstMessage.ayuDeletedAttribute != nil
++        self.mainContainerNode.alpha = isDeleted ? 0.6 : 1.0
++    }
++    
+     override public func updateAccessibilityData(_ accessibilityData: ChatMessageAccessibilityData) {
+         super.updateAccessibilityData(accessibilityData)
+         
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageDateAndStatusNode/Sources/StringForMessageTimestampStatus.swift b/submodules/TelegramUI/Components/Chat/ChatMessageDateAndStatusNode/Sources/StringForMessageTimestampStatus.swift
+index ad79b915..bd75fbf3 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageDateAndStatusNode/Sources/StringForMessageTimestampStatus.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageDateAndStatusNode/Sources/StringForMessageTimestampStatus.swift
+@@ -251,5 +251,10 @@ public func stringForMessageTimestampStatus(
+         }
+     }
+     
++    // AyuGram: deleted on the server, kept here.
++    if message._asMessage().ayuDeletedAttribute != nil {
++        dateText = "🗑 \(dateText)"
++    }
++    
+     return dateText
+ }
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/BUILD b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/BUILD
+index 0ca07f27..fb69d588 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/BUILD
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/BUILD
+@@ -114,6 +114,7 @@ swift_library(
+         "//submodules/TelegramBaseController",
+         "//submodules/TelegramCallsUI",
+         "//submodules/TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/TelegramIntents",
+         "//submodules/TelegramNotices",
+         "//submodules/TelegramPresentationData",
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
+index 34f23770..51d993ab 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
+@@ -1,5 +1,6 @@
+ import Foundation
+ import UIKit
++import AyuGramSettings
+ import Display
+ import AccountContext
+ import TelegramPresentationData
+@@ -900,6 +901,14 @@ func infoItems(
+         }
+     }
+     
++    // AyuGram: the peer's ID and the data center its profile photo is on; a tap copies the ID.
++    if let peer = data.peer, let idText = ayuPeerIdText(peer: peer, format: AyuSettings.shared.values.peerIdFormat) {
++        items[.peerInfo]!.append(PeerInfoScreenLabeledValueItem(id: 99000, label: "ID", text: idText.display, textColor: .primary, action: { _, _ in
++            UIPasteboard.general.string = idText.copy
++        }, requestLayout: { _ in
++        }))
++    }
++    
+     var result: [(AnyHashable, [PeerInfoScreenItem])] = []
+     for section in InfoSection.allCases {
+         if let sectionItems = items[section], !sectionItems.isEmpty {
+@@ -909,6 +918,31 @@ func infoItems(
+     return result
+ }
+ 
++private func ayuPeerIdText(peer: EnginePeer, format: AyuPeerIdFormat) -> (display: String, copy: String)? {
++    let rawId = peer.id.id._internalGetInt64Value()
++    var id = rawId
++    switch format {
++    case .hidden:
++        return nil
++    case .telegramApi:
++        break
++    case .botApi:
++        switch peer {
++        case .legacyGroup:
++            id = -rawId
++        case .channel:
++            id = -1000000000000 - rawId
++        default:
++            break
++        }
++    }
++    var display = "\(id)"
++    if let resource = peer.smallProfileImage?.resource as? CloudPeerPhotoSizeMediaResource {
++        display += " · DC \(resource.datacenterId)"
++    }
++    return (display, "\(id)")
++}
++
+ func editingItems(data: PeerInfoScreenData?, boostStatus: ChannelBoostStatus?, state: PeerInfoState, chatLocation: ChatLocation, context: AccountContext, presentationData: PresentationData, interaction: PeerInfoInteraction) -> [(AnyHashable, [PeerInfoScreenItem])] {
+     enum Section: Int, CaseIterable {
+         case notifications
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
+index 8c4a24b7..8818e7b1 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
+@@ -191,6 +191,7 @@ enum PeerInfoSettingsSection {
+     case emojiStatus
+     case profileColor
+     case powerSaving
++    case ayuGram
+     case businessSetup
+     case profile
+     case premiumManagement
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
+index f1c1917b..d98c3645 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
+@@ -278,6 +278,8 @@ extension PeerInfoScreenNode {
+             self.interaction.editingOpenNameColorSetup()
+         case .powerSaving:
+             push(energySavingSettingsScreen(context: self.context))
++        case .ayuGram:
++            push(ayuGramSettingsController(context: self.context))
+         case .businessSetup:
+             guard let controller = self.controller, !controller.presentAccountFrozenInfoIfNeeded() else {
+                 return
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift
+index a4873696..6d06a686 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift
+@@ -253,6 +253,9 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
+     } else {
+         notificationsWarning = false
+     }
++    items[.advanced]!.append(PeerInfoScreenDisclosureItem(id: 100, text: "AyuGram", icon: PresentationResourcesSettings.security, action: {
++        interaction.openSettings(.ayuGram)
++    }))
+     items[.advanced]!.append(PeerInfoScreenDisclosureItem(id: 0, label: notificationsWarning ? .badge("!", presentationData.theme.list.itemDestructiveColor) : .none, text: presentationData.strings.Settings_NotificationsAndSounds, icon: PresentationResourcesSettings.notifications, action: {
+         interaction.openSettings(.notificationsAndSounds)
+     }))
+diff --git a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/BUILD b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/BUILD
+index cca31821..bd0e98f9 100644
+--- a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/BUILD
++++ b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/BUILD
+@@ -24,6 +24,7 @@ swift_library(
+         "//submodules/SSignalKit/SwiftSignalKit",
+         "//submodules/AppBundle",
+         "//submodules/TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/Postbox",
+         "//submodules/ShareController",
+         "//submodules/UndoUI",
+diff --git a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
+index 78727862..a5e09cf9 100644
+--- a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
++++ b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import UIKit
+ import Display
+ import ComponentFlow
+@@ -8,6 +9,7 @@ import SwiftSignalKit
+ import AppBundle
+ import MessageInputPanelComponent
+ import TelegramCore
++import PresentationDataUtils
+ import UndoUI
+ import ReactionSelectionNode
+ import EntityKeyboard
+@@ -2219,6 +2221,41 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
+         self.supportedOrientations = ViewControllerSupportedOrientations(regularSize: .all, compactSize: [.portrait])
+         
+         self.context.sharedContext.hasPreloadBlockingContent.set(.single(true))
++        
++        // AyuGram: story views wait for the answer to the ghost mode suggestion.
++        let ayuSettings = AyuSettings.shared.values
++        if ayuSettings.suggestGhostModeBeforeViewingStory && !ayuSettings.suppressesReadStories {
++            self.ayuHoldsStoryReads = true
++            AyuSettings.shared.holdStoryReads()
++        }
++    }
++    
++    private var ayuHoldsStoryReads = false
++    
++    private func ayuReleaseStoryReads() {
++        if self.ayuHoldsStoryReads {
++            self.ayuHoldsStoryReads = false
++            AyuSettings.shared.releaseStoryReads()
++        }
++    }
++    
++    private func ayuSuggestGhostMode() {
++        guard self.ayuHoldsStoryReads else {
++            return
++        }
++        let alert = textAlertController(context: self.context, title: "Режим призрака", text: "Включить режим призрака, чтобы автор не увидел ваш просмотр?", actions: [
++            TextAlertAction(type: .genericAction, title: "Нет", action: { [weak self] in
++                self?.ayuReleaseStoryReads()
++            }),
++            TextAlertAction(type: .defaultAction, title: "Включить", action: { [weak self] in
++                AyuSettings.shared.update { values in
++                    values.ghostModeEnabled = true
++                    values.sendReadStoryPackets = false
++                }
++                self?.ayuReleaseStoryReads()
++            })
++        ], dismissOnOutsideTap: false)
++        self.present(alert, in: .window(.root))
+     }
+     
+     required public init(coder aDecoder: NSCoder) {
+@@ -2228,6 +2265,7 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
+     deinit {
+         self.context.sharedContext.hasPreloadBlockingContent.set(.single(false))
+         self.focusedItemPromise.set(.single(nil))
++        self.ayuReleaseStoryReads()
+     }
+     
+     override public func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
+@@ -2245,6 +2283,8 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
+             if let componentView = self.node.hostView.componentView as? StoryContainerScreenComponent.View {
+                 componentView.animateIn()
+             }
++            
++            self.ayuSuggestGhostMode()
+         }
+     }
+ 
+diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
+index 1ceb46bc..80b84def 100644
+--- a/submodules/TelegramUI/Sources/AppDelegate.swift
++++ b/submodules/TelegramUI/Sources/AppDelegate.swift
+@@ -573,8 +573,14 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
+             BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
+         })
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
+-        
++        var maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        if maybeAppGroupUrl == nil {
++            // AyuGram: a re-signed build (AltStore, SideStore, Sideloadly) often has no "group.<bundle id>"
++            // app group, which used to stop the launch on a blank screen. Keep the data in the app's own
++            // container instead; only the extensions (share, notifications, widgets) lose access to it.
++            maybeAppGroupUrl = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
++        }
++
+         let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)
+         self.buildConfig = buildConfig
+         let signatureDict = BuildConfigExtra.signatureDict()
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 1ade8c01..435569b7 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -1348,6 +1348,23 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+         }
+         
+         let isCopyProtected = chatPresentationInterfaceState.copyProtectionEnabled || message.isCopyProtected()
++        
++        // AyuGram: the earlier texts of an edited message.
++        if let editHistory = message.ayuEditHistoryAttribute, !editHistory.revisions.isEmpty {
++            actions.append(.action(ContextMenuActionItem(text: "История правок", icon: { theme in
++                return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Edit"), color: theme.actionSheet.primaryTextColor)
++            }, action: { c, _ in
++                c?.dismiss(completion: {
++                    let presentationData = context.sharedContext.currentPresentationData.with { $0 }
++                    var text = ""
++                    for revision in editHistory.revisions {
++                        text += "\(stringForMediumDate(timestamp: revision.date, strings: presentationData.strings, dateTimeFormat: presentationData.dateTimeFormat))\n\(revision.text)\n\n"
++                    }
++                    text += "Сейчас:\n\(message.text)"
++                    controllerInteraction.presentController(textAlertController(context: context, title: "История правок", text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_OK, action: {})]), nil)
++                })
++            })))
++        }
+         if !messageText.isEmpty || richMessageMarkdown != nil || (resourceAvailable && isImage) || diceEmoji != nil {
+             if !isExpired {
+                 if !isPoll {
+diff --git a/submodules/TelegramUI/Sources/SharedWakeupManager.swift b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+index b7c69492..29ca3260 100644
+--- a/submodules/TelegramUI/Sources/SharedWakeupManager.swift
++++ b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ import BackgroundTasks
+ import AVFAudio
++import AyuGramSettings
+ import UIKit
+ import SwiftSignalKit
+ import TelegramCore
+@@ -91,6 +92,8 @@ public final class SharedWakeupManager {
+     private var managedPausedInBackgroundPlayer: Disposable?
+     private var keepIdleDisposable: Disposable?
+     private var silenceAudioRenderer: MediaPlayerAudioRenderer?
++    private var ayuKeepAliveInBackground: Bool = false
++    private var ayuSettingsDisposable: Disposable?
+     
+     private var accountsAndTasks: [(Account, Bool, AccountTasks)] = []
+     
+@@ -168,6 +171,17 @@ public final class SharedWakeupManager {
+             strongSelf.checkTasks()
+         })
+         
++        self.ayuSettingsDisposable = (AyuSettings.shared.signal
++        |> map { $0.keepAliveInBackground }
++        |> distinctUntilChanged
++        |> deliverOnMainQueue).startStrict(next: { [weak self] value in
++            guard let strongSelf = self else {
++                return
++            }
++            strongSelf.ayuKeepAliveInBackground = value
++            strongSelf.checkTasks()
++        })
++        
+         self.hasActiveAudioSessionDisposable = (hasActiveAudioSession
+         |> deliverOnMainQueue).startStrict(next: { [weak self] value in
+             guard let strongSelf = self else {
+@@ -358,6 +372,7 @@ public final class SharedWakeupManager {
+         self.accountSettingsDisposable?.dispose()
+         self.inForegroundDisposable?.dispose()
+         self.hasActiveAudioSessionDisposable?.dispose()
++        self.ayuSettingsDisposable?.dispose()
+         self.tasksDisposable?.dispose()
+         self.pendingMediaUploadsDisposable?.dispose()
+         self.pendingStoryUploadsDisposable?.dispose()
+@@ -1130,6 +1145,45 @@ public final class SharedWakeupManager {
+             self.silenceAudioRenderer = nil
+             silenceAudioRenderer.stop()
+         }*/
++        
++        // AyuGram "keep alive in background": the silence above, enabled by the setting. Playback mixed with
++        // other audio keeps iOS from suspending the app, and updateAccounts keeps the connection while it plays.
++        if !self.inForeground && self.ayuKeepAliveInBackground && !self.hasActiveAudioSession {
++            if self.silenceAudioRenderer == nil {
++                let silenceAudioRenderer = MediaPlayerAudioRenderer(
++                    audioSession: .custom({ control in
++                        let audioSession = AVAudioSession.sharedInstance()
++                        let _ = try? audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
++                        let _ = try? audioSession.setActive(true)
++                        control.activate()
++                        
++                        return ActionDisposable {
++                            let _ = try? audioSession.setActive(false, options: [.notifyOthersOnDeactivation])
++                        }
++                    }),
++                    forAudioVideoMessage: false,
++                    playAndRecord: false,
++                    useVoiceProcessingMode: false,
++                    soundMuted: false,
++                    ambient: false,
++                    mixWithOthers: true,
++                    forceAudioToSpeaker: false,
++                    baseRate: 1.0,
++                    audioLevelPipe: ValuePipe(),
++                    updatedRate: {},
++                    audioPaused: {}
++                )
++                self.silenceAudioRenderer = silenceAudioRenderer
++                silenceAudioRenderer.start()
++                Logger.shared.log("Wakeup", "AyuGram keep-alive started")
++                self.updateAccounts(hasTasks: hasTasksForBackgroundExtension, endTaskAfterTransactionsComplete: nil)
++            }
++        } else if let silenceAudioRenderer = self.silenceAudioRenderer {
++            self.silenceAudioRenderer = nil
++            silenceAudioRenderer.stop()
++            Logger.shared.log("Wakeup", "AyuGram keep-alive stopped")
++            self.updateAccounts(hasTasks: hasTasksForBackgroundExtension, endTaskAfterTransactionsComplete: nil)
++        }
+     }
+     
+     private func updateAccounts(hasTasks: Bool, endTaskAfterTransactionsComplete: UIBackgroundTaskIdentifier?) {
+@@ -1141,7 +1195,7 @@ public final class SharedWakeupManager {
+             for (account, primary, tasks) in self.accountsAndTasks {
+                 account.postbox.setCanBeginTransactions(true)
+                 
+-                if (self.inForeground && primary) || !tasks.isEmpty || (self.activeExplicitExtensionTimer != nil && primary) {
++                if (self.inForeground && primary) || !tasks.isEmpty || (self.activeExplicitExtensionTimer != nil && primary) || (self.silenceAudioRenderer != nil && primary) {
+                     account.shouldBeServiceTaskMaster.set(.single(.always))
+                 } else {
+                     account.shouldBeServiceTaskMaster.set(.single(.never))
+diff --git a/submodules/TextFormat/BUILD b/submodules/TextFormat/BUILD
+index 33e764d3..f0c22f2e 100644
+--- a/submodules/TextFormat/BUILD
++++ b/submodules/TextFormat/BUILD
+@@ -14,6 +14,7 @@ swift_library(
+     deps = [
+         "//submodules/SSignalKit/SwiftSignalKit",
+     	"//submodules/TelegramCore:TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/Display:Display",
+         "//submodules/TelegramPresentationData:TelegramPresentationData",
+         "//submodules/Markdown:Markdown",
+diff --git a/submodules/TextFormat/Sources/DateFormat.swift b/submodules/TextFormat/Sources/DateFormat.swift
+index e967c93f..d0036a5f 100644
+--- a/submodules/TextFormat/Sources/DateFormat.swift
++++ b/submodules/TextFormat/Sources/DateFormat.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import TelegramCore
+ import TelegramPresentationData
+ import TelegramUIPreferences
+@@ -140,7 +141,9 @@ public func stringForMessageTimestamp(timestamp: Int32, dateTimeFormat: Presenta
+         gmtime_r(&t, &timeinfo)
+     }
+     
+-    return stringForShortTimestamp(hours: timeinfo.tm_hour, minutes: timeinfo.tm_min, seconds: withSeconds ? timeinfo.tm_sec : nil, dateTimeFormat: dateTimeFormat)
++    // AyuGram: "time with seconds" adds seconds to message times.
++    let showSeconds = withSeconds || AyuSettings.shared.values.showMessageSeconds
++    return stringForShortTimestamp(hours: timeinfo.tm_hour, minutes: timeinfo.tm_min, seconds: showSeconds ? timeinfo.tm_sec : nil, dateTimeFormat: dateTimeFormat)
+ }
+ 
+ public func stringForShortDate(timestamp: Int32, strings: PresentationStrings, dateTimeFormat: PresentationDateTimeFormat, withTime: Bool = true) -> String {
