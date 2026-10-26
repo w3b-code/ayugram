@@ -38,10 +38,10 @@ index 00000000..51b43fe9
 +)
 diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 new file mode 100644
-index 00000000..7e808001
+index 00000000..7d6c704c
 --- /dev/null
 +++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,263 @@
 +import Foundation
 +import SwiftSignalKit
 +
@@ -150,6 +150,11 @@ index 00000000..7e808001
 +
 +    public var sendsOfflineAfterOnline: Bool {
 +        return self.ghostModeEnabled && self.sendOfflinePacketAfterOnline
++    }
++
++    /// After the user sends a message or reaction while "online" is hidden.
++    public var sendsOfflineAfterAction: Bool {
++        return self.suppressesOnline && self.sendOfflinePacketAfterOnline
 +    }
 +
 +    public var suppressesReadStories: Bool {
@@ -429,7 +434,7 @@ index 32438133..45acd0c5 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..4343751e
+index 00000000..2663a4fb
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 @@ -0,0 +1,232 @@
@@ -612,8 +617,8 @@ index 00000000..4343751e
 +    toggle(.ghostOptions, .sendReadStories, "Не читать истории", !values.sendReadStoryPackets, enabled: ghost)
 +    toggle(.ghostOptions, .sendOnline, "Не отправлять «в сети»", !values.sendOnlinePackets, enabled: ghost)
 +    toggle(.ghostOptions, .sendTyping, "Не отправлять «печатает»", !values.sendUploadProgress, enabled: ghost)
-+    toggle(.ghostOptions, .sendOfflineAfterOnline, "Автоматический «не в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost && values.sendOnlinePackets)
-+    footer(.ghostOptions, "Включённый пункт скрывает действие от собеседников, пока режим призрака включён. «Автоматический „не в сети“» работает, когда «в сети» всё-таки отправляется: сразу за ним уходит «не в сети». Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными.")
++    toggle(.ghostOptions, .sendOfflineAfterOnline, "Автоматический «не в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost)
++    footer(.ghostOptions, "Включённый пункт скрывает действие от собеседников, пока режим призрака включён. «Автоматический „не в сети“» отправляет «не в сети» сразу после «в сети», а также после ваших сообщений и реакций: сервер сам показывает вас в сети, когда вы что-то отправляете. При сворачивании приложения «не в сети» уходит всегда. Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными.")
 +
 +    toggle(.ghostExtras, .markReadAfterAction, "Читать при действиях", values.markReadAfterAction, enabled: ghost)
 +    toggle(.ghostExtras, .suggestGhostForStories, "Предлагать призрака для историй", values.suggestGhostModeBeforeViewingStory)
@@ -692,10 +697,10 @@ index a59eefd1..dbf1e3d0 100644
      declareEncodable(TelegramMediaStory.self, f: { TelegramMediaStory(decoder: $0) })
 diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
 new file mode 100644
-index 00000000..f45326ea
+index 00000000..12b287a2
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,227 @@
 +import Foundation
 +import AyuGramSettings
 +import Postbox
@@ -844,6 +849,9 @@ index 00000000..f45326ea
 +    if settings.marksReadAfterAction {
 +        ayuMarkReadAfterAction(account: account, peerId: peerId)
 +    }
++    if settings.sendsOfflineAfterAction {
++        ayuSendOfflineAfterAction(account: account)
++    }
 +    guard settings.sendsWithoutSound else {
 +        return messages
 +    }
@@ -904,6 +912,21 @@ index 00000000..f45326ea
 +            }
 +        }
 +    }).start()
++}
++
++/// Sending a message or a reaction makes the server show the account online; in ghost mode,
++/// "offline" follows once the action has gone out.
++func ayuSendOfflineAfterAction(account: Account) {
++    let network = account.network
++    let _ = (Signal<Never, NoError>.complete()
++    |> delay(2.0, queue: Queue.concurrentDefaultQueue())
++    |> then(
++        network.request(Api.functions.account.updateStatus(offline: .boolTrue))
++        |> ignoreValues
++        |> `catch` { _ -> Signal<Never, NoError> in
++            return .complete()
++        }
++    )).start()
 +}
 diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
 index 29b9d386..08c8b5c7 100644
@@ -1013,7 +1036,7 @@ index ba4569ed..44ac8a4f 100644
                  if let generatedEvent = generatedEvent {
                      addedReactionEvents.append(generatedEvent)
 diff --git a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
-index 8c8a4fa3..c30a128a 100644
+index 8c8a4fa3..7e3e4293 100644
 --- a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 +++ b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
 @@ -1,4 +1,5 @@
@@ -1022,14 +1045,56 @@ index 8c8a4fa3..c30a128a 100644
  import TelegramApi
  import Postbox
  import SwiftSignalKit
-@@ -53,11 +54,25 @@ private final class AccountPresenceManagerImpl {
+@@ -13,6 +14,7 @@ private final class AccountPresenceManagerImpl {
+     let isPerformingUpdate = ValuePromise<Bool>(false, ignoreRepeated: true)
+     
+     private var shouldKeepOnlinePresenceDisposable: Disposable?
++    private var ayuSettingsDisposable: Disposable?
+     private let currentRequestDisposable = MetaDisposable()
+     private var onlineTimer: SignalKitTimer?
+     
+@@ -33,11 +35,33 @@ private final class AccountPresenceManagerImpl {
+                 self.updatePresence(value)
+             }
+         })
++        
++        // AyuGram: hiding "online" while the app is open ends the online status at once instead of
++        // when it times out on the server; showing it again sends "online" at once.
++        self.ayuSettingsDisposable = (AyuSettings.shared.signal
++        |> map { $0.suppressesOnline }
++        |> distinctUntilChanged
++        |> deliverOn(self.queue)).start(next: { [weak self] suppressesOnline in
++            guard let `self` = self, self.wasOnline else {
++                return
++            }
++            if suppressesOnline {
++                self.currentRequestDisposable.set((self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
++                |> `catch` { _ -> Signal<Api.Bool, NoError> in
++                    return .single(.boolFalse)
++                }).start())
++            } else {
++                self.onlineTimer?.invalidate()
++                self.onlineTimer = nil
++                self.updatePresence(true)
++            }
++        })
+     }
+     
+     deinit {
+         assert(self.queue.isCurrent())
+         self.shouldKeepOnlinePresenceDisposable?.dispose()
++        self.ayuSettingsDisposable?.dispose()
+         self.currentRequestDisposable.dispose()
+         self.onlineTimer?.invalidate()
+     }
+@@ -53,10 +77,22 @@ private final class AccountPresenceManagerImpl {
              }, queue: self.queue)
              self.onlineTimer = timer
              timer.start()
 -            request = self.network.request(Api.functions.account.updateStatus(offline: .boolFalse))
 +            let ayuSettings = AyuSettings.shared.values
 +            if ayuSettings.suppressesOnline {
-+                // AyuGram ghost mode: no status at all, since going offline would also update "last seen".
++                // AyuGram ghost mode: "online" is never sent.
 +                request = .single(.boolTrue)
 +            } else if ayuSettings.sendsOfflineAfterOnline {
 +                request = self.network.request(Api.functions.account.updateStatus(offline: .boolFalse))
@@ -1040,18 +1105,14 @@ index 8c8a4fa3..c30a128a 100644
          } else {
              self.onlineTimer?.invalidate()
              self.onlineTimer = nil
--            request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
-+            if AyuSettings.shared.values.suppressesOnline {
-+                // AyuGram ghost mode: "offline" would also move "last seen" to now.
-+                request = .single(.boolTrue)
-+            } else {
-+                request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
-+            }
++            // "Offline" always goes out, in ghost mode too (as in AyuGram4A, which holds back only
++            // "online"): the server can still have the account online from before ghost mode or from
++            // sending a message, and only this ends it right away instead of minutes later.
+             request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
          }
          self.isPerformingUpdate.set(true)
-         self.currentRequestDisposable.set((request
 diff --git a/submodules/TelegramCore/Sources/State/MessageReactions.swift b/submodules/TelegramCore/Sources/State/MessageReactions.swift
-index fae38f8b..9f779163 100644
+index fae38f8b..5893e315 100644
 --- a/submodules/TelegramCore/Sources/State/MessageReactions.swift
 +++ b/submodules/TelegramCore/Sources/State/MessageReactions.swift
 @@ -1,4 +1,5 @@
@@ -1060,13 +1121,19 @@ index fae38f8b..9f779163 100644
  import Postbox
  import SwiftSignalKit
  import TelegramApi
-@@ -22,6 +23,10 @@ public enum UpdateMessageReaction {
+@@ -22,6 +23,16 @@ public enum UpdateMessageReaction {
  }
  
  public func updateMessageReactionsInteractively(account: Account, messageIds: [MessageId], reactions: [UpdateMessageReaction], isLarge: Bool, storeAsRecentlyUsed: Bool, add: Bool = false) -> Signal<Never, NoError> {
 +    // AyuGram: a reaction counts as an action for "read after action".
-+    if !reactions.isEmpty, let peerId = messageIds.first?.peerId, AyuSettings.shared.values.marksReadAfterAction {
-+        ayuMarkReadAfterAction(account: account, peerId: peerId)
++    if !reactions.isEmpty, let peerId = messageIds.first?.peerId {
++        let settings = AyuSettings.shared.values
++        if settings.marksReadAfterAction {
++            ayuMarkReadAfterAction(account: account, peerId: peerId)
++        }
++        if settings.sendsOfflineAfterAction {
++            ayuSendOfflineAfterAction(account: account)
++        }
 +    }
      return account.postbox.transaction { transaction -> Void in
          guard let chatPeerId = messageIds.first?.peerId else {
