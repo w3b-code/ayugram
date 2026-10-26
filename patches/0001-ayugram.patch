@@ -736,6 +736,27 @@ index a4873696..6d06a686 100644
      items[.advanced]!.append(PeerInfoScreenDisclosureItem(id: 0, label: notificationsWarning ? .badge("!", presentationData.theme.list.itemDestructiveColor) : .none, text: presentationData.strings.Settings_NotificationsAndSounds, icon: PresentationResourcesSettings.notifications, action: {
          interaction.openSettings(.notificationsAndSounds)
      }))
+diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
+index 941074ea..cdc13aa4 100644
+--- a/submodules/TelegramUI/Sources/AppDelegate.swift
++++ b/submodules/TelegramUI/Sources/AppDelegate.swift
+@@ -562,8 +562,14 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
+             BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
+         })
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
+-        
++        var maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        if maybeAppGroupUrl == nil {
++            // AyuGram: a re-signed build (AltStore, SideStore, Sideloadly) often has no "group.<bundle id>"
++            // app group, which used to stop the launch on a blank screen. Keep the data in the app's own
++            // container instead; only the extensions (share, notifications, widgets) lose access to it.
++            maybeAppGroupUrl = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
++        }
++
+         let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)
+         self.buildConfig = buildConfig
+         let signatureDict = BuildConfigExtra.signatureDict()
 diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 index 9694d716..468238be 100644
 --- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
