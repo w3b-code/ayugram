@@ -429,10 +429,10 @@ index 32438133..45acd0c5 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..9078b3a5
+index 00000000..4343751e
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,232 @@
 +import Foundation
 +import UIKit
 +import Display
@@ -486,14 +486,15 @@ index 00000000..9078b3a5
 +        switch self {
 +        case .ghostMode:
 +            values.ghostModeEnabled = value
++        // The ghost options are shown as AyuGram4A shows them: on means the packet is held back.
 +        case .sendReadMessages:
-+            values.sendReadMessagePackets = value
++            values.sendReadMessagePackets = !value
 +        case .sendReadStories:
-+            values.sendReadStoryPackets = value
++            values.sendReadStoryPackets = !value
 +        case .sendOnline:
-+            values.sendOnlinePackets = value
++            values.sendOnlinePackets = !value
 +        case .sendTyping:
-+            values.sendUploadProgress = value
++            values.sendUploadProgress = !value
 +        case .sendOfflineAfterOnline:
 +            values.sendOfflinePacketAfterOnline = value
 +        case .markReadAfterAction:
@@ -606,13 +607,13 @@ index 00000000..9078b3a5
 +    toggle(.ghost, .ghostMode, "Режим призрака", ghost)
 +    footer(.ghost, "Пока режим включён, сервер не узнаёт о действиях, которые выключены ниже.")
 +
-+    header(.ghostOptions, "ЧТО ОТПРАВЛЯТЬ")
-+    toggle(.ghostOptions, .sendReadMessages, "Отметки о прочтении", values.sendReadMessagePackets, enabled: ghost)
-+    toggle(.ghostOptions, .sendReadStories, "Просмотр историй", values.sendReadStoryPackets, enabled: ghost)
-+    toggle(.ghostOptions, .sendOnline, "Статус «в сети»", values.sendOnlinePackets, enabled: ghost)
-+    toggle(.ghostOptions, .sendTyping, "«Печатает…» и загрузка", values.sendUploadProgress, enabled: ghost)
-+    toggle(.ghostOptions, .sendOfflineAfterOnline, "«Не в сети» после «в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost && values.sendOnlinePackets)
-+    footer(.ghostOptions, "Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными.")
++    header(.ghostOptions, "ЧТО СКРЫВАТЬ")
++    toggle(.ghostOptions, .sendReadMessages, "Не читать сообщения", !values.sendReadMessagePackets, enabled: ghost)
++    toggle(.ghostOptions, .sendReadStories, "Не читать истории", !values.sendReadStoryPackets, enabled: ghost)
++    toggle(.ghostOptions, .sendOnline, "Не отправлять «в сети»", !values.sendOnlinePackets, enabled: ghost)
++    toggle(.ghostOptions, .sendTyping, "Не отправлять «печатает»", !values.sendUploadProgress, enabled: ghost)
++    toggle(.ghostOptions, .sendOfflineAfterOnline, "Автоматический «не в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost && values.sendOnlinePackets)
++    footer(.ghostOptions, "Включённый пункт скрывает действие от собеседников, пока режим призрака включён. «Автоматический „не в сети“» работает, когда «в сети» всё-таки отправляется: сразу за ним уходит «не в сети». Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными.")
 +
 +    toggle(.ghostExtras, .markReadAfterAction, "Читать при действиях", values.markReadAfterAction, enabled: ghost)
 +    toggle(.ghostExtras, .suggestGhostForStories, "Предлагать призрака для историй", values.suggestGhostModeBeforeViewingStory)
