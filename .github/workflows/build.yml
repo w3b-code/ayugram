@@ -46,6 +46,16 @@ jobs:
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
 
+      - name: Install Metal toolchain
+        run: |
+          # Since Xcode 26 the Metal compiler is a separate download; some runner images lack it.
+          if xcrun metal --version >/dev/null 2>&1; then
+            echo "Metal toolchain present"
+          else
+            xcodebuild -downloadComponent MetalToolchain || sudo xcodebuild -downloadComponent MetalToolchain
+            xcrun metal --version
+          fi
+
       - name: Clone Telegram-iOS
         run: |
           git clone --recursive -j8 --depth 1 --shallow-submodules \
