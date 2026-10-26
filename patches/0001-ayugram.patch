@@ -24,10 +24,10 @@ index 00000000..51b43fe9
 +)
 diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 new file mode 100644
-index 00000000..b0f87f9f
+index 00000000..1786d5e2
 --- /dev/null
 +++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,148 @@
 +import Foundation
 +import SwiftSignalKit
 +
@@ -53,6 +53,9 @@ index 00000000..b0f87f9f
 +    // Interface.
 +    public var disableAds: Bool
 +    public var hideStories: Bool
++    /// Plays silence while the app is in the background, so iOS does not suspend it and the
++    /// connection stays up to catch deletions and edits.
++    public var keepAliveInBackground: Bool
 +
 +    public static let `default` = AyuSettingsValues(
 +        ghostModeEnabled: false,
@@ -65,7 +68,8 @@ index 00000000..b0f87f9f
 +        saveMessagesHistory: true,
 +        semiTransparentDeletedMessages: true,
 +        disableAds: true,
-+        hideStories: false
++        hideStories: false,
++        keepAliveInBackground: false
 +    )
 +
 +    /// Whether `name` (a TL function name such as `messages.readHistory`) must not reach the server:
@@ -130,6 +134,7 @@ index 00000000..b0f87f9f
 +        load("semiTransparentDeletedMessages", &values.semiTransparentDeletedMessages)
 +        load("disableAds", &values.disableAds)
 +        load("hideStories", &values.hideStories)
++        load("keepAliveInBackground", &values.keepAliveInBackground)
 +        self.current = values
 +        self.promise = ValuePromise(values, ignoreRepeated: true)
 +    }
@@ -166,6 +171,7 @@ index 00000000..b0f87f9f
 +        store("semiTransparentDeletedMessages", updated.semiTransparentDeletedMessages)
 +        store("disableAds", updated.disableAds)
 +        store("hideStories", updated.hideStories)
++        store("keepAliveInBackground", updated.keepAliveInBackground)
 +
 +        self.promise.set(updated)
 +    }
@@ -277,10 +283,10 @@ index 32438133..45acd0c5 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..713d3cae
+index 00000000..aa0e558e
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,221 @@
 +import Foundation
 +import UIKit
 +import Display
@@ -324,6 +330,7 @@ index 00000000..713d3cae
 +    case saveDeleted(Bool)
 +    case saveHistory(Bool)
 +    case semiTransparent(Bool)
++    case keepAlive(Bool)
 +    case savingFooter
 +
 +    case interfaceHeader
@@ -337,7 +344,7 @@ index 00000000..713d3cae
 +            return AyuGramSettingsSection.ghost.rawValue
 +        case .ghostOptionsHeader, .sendReadMessages, .sendReadStories, .sendOnline, .sendTyping, .sendOfflineAfterOnline, .ghostOptionsFooter:
 +            return AyuGramSettingsSection.ghostOptions.rawValue
-+        case .savingHeader, .saveDeleted, .saveHistory, .semiTransparent, .savingFooter:
++        case .savingHeader, .saveDeleted, .saveHistory, .semiTransparent, .keepAlive, .savingFooter:
 +            return AyuGramSettingsSection.saving.rawValue
 +        case .interfaceHeader, .disableAds, .hideStories, .interfaceFooter:
 +            return AyuGramSettingsSection.interface.rawValue
@@ -384,11 +391,23 @@ index 00000000..713d3cae
 +            return 17
 +        case .interfaceFooter:
 +            return 18
++        case .keepAlive:
++            return 19
++        }
++    }
++
++    // Display order; stableId only identifies an entry.
++    private var sortIndex: Int32 {
++        switch self {
++        case .keepAlive:
++            return 13 * 10 + 5
++        default:
++            return self.stableId * 10
 +        }
 +    }
 +
 +    static func <(lhs: AyuGramSettingsEntry, rhs: AyuGramSettingsEntry) -> Bool {
-+        return lhs.stableId < rhs.stableId
++        return lhs.sortIndex < rhs.sortIndex
 +    }
 +
 +    func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
@@ -427,8 +446,10 @@ index 00000000..713d3cae
 +            return toggle("Сохранять историю правок", value, { $0.saveMessagesHistory = $1 })
 +        case let .semiTransparent(value):
 +            return toggle("Полупрозрачные удалённые", value, { $0.semiTransparentDeletedMessages = $1 })
++        case let .keepAlive(value):
++            return toggle("Держать в фоне", value, { $0.keepAliveInBackground = $1 })
 +        case .savingFooter:
-+            return ItemListTextItem(presentationData: presentationData, text: .plain("Удалённые сообщения остаются в чате с меткой 🗑. История правок открывается из меню сообщения. Всё хранится только на этом устройстве."), sectionId: self.section)
++            return ItemListTextItem(presentationData: presentationData, text: .plain("Удалённые сообщения остаются в чате с меткой 🗑. История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить. «Держать в фоне» не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи). Закрытое смахиванием приложение не работает."), sectionId: self.section)
 +        case .interfaceHeader:
 +            return ItemListSectionHeaderItem(presentationData: presentationData, text: "ИНТЕРФЕЙС", sectionId: self.section)
 +        case let .disableAds(value):
@@ -460,6 +481,7 @@ index 00000000..713d3cae
 +    entries.append(.saveDeleted(values.saveDeletedMessages))
 +    entries.append(.saveHistory(values.saveMessagesHistory))
 +    entries.append(.semiTransparent(values.semiTransparentDeletedMessages))
++    entries.append(.keepAlive(values.keepAliveInBackground))
 +    entries.append(.savingFooter)
 +
 +    entries.append(.interfaceHeader)
@@ -784,6 +806,18 @@ index 91c5c772..f547444f 100644
          },
          decodeMessageThreadInfo: { entry in
              guard let data = entry.get(MessageHistoryThreadData.self) else {
+diff --git a/submodules/TelegramUI/BUILD b/submodules/TelegramUI/BUILD
+index 8873646e..0e171f12 100644
+--- a/submodules/TelegramUI/BUILD
++++ b/submodules/TelegramUI/BUILD
+@@ -71,6 +71,7 @@ swift_library(
+         "//submodules/Display:Display",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
++        "//submodules/AyuGram/AyuGramSettings",
+         "//submodules/WebProxyTransport:WebProxyTransport",
+         "//submodules/MtProtoKit:MtProtoKit",
+         "//submodules/TelegramPresentationData:TelegramPresentationData",
 diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
 index c4badf4e..f2f1280a 100644
 --- a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
@@ -924,3 +958,105 @@ index 9694d716..468238be 100644
          if !messageText.isEmpty || richMessageMarkdown != nil || (resourceAvailable && isImage) || diceEmoji != nil {
              if !isExpired {
                  if !isPoll {
+diff --git a/submodules/TelegramUI/Sources/SharedWakeupManager.swift b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+index b7c69492..29ca3260 100644
+--- a/submodules/TelegramUI/Sources/SharedWakeupManager.swift
++++ b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ import BackgroundTasks
+ import AVFAudio
++import AyuGramSettings
+ import UIKit
+ import SwiftSignalKit
+ import TelegramCore
+@@ -91,6 +92,8 @@ public final class SharedWakeupManager {
+     private var managedPausedInBackgroundPlayer: Disposable?
+     private var keepIdleDisposable: Disposable?
+     private var silenceAudioRenderer: MediaPlayerAudioRenderer?
++    private var ayuKeepAliveInBackground: Bool = false
++    private var ayuSettingsDisposable: Disposable?
+     
+     private var accountsAndTasks: [(Account, Bool, AccountTasks)] = []
+     
+@@ -168,6 +171,17 @@ public final class SharedWakeupManager {
+             strongSelf.checkTasks()
+         })
+         
++        self.ayuSettingsDisposable = (AyuSettings.shared.signal
++        |> map { $0.keepAliveInBackground }
++        |> distinctUntilChanged
++        |> deliverOnMainQueue).startStrict(next: { [weak self] value in
++            guard let strongSelf = self else {
++                return
++            }
++            strongSelf.ayuKeepAliveInBackground = value
++            strongSelf.checkTasks()
++        })
++        
+         self.hasActiveAudioSessionDisposable = (hasActiveAudioSession
+         |> deliverOnMainQueue).startStrict(next: { [weak self] value in
+             guard let strongSelf = self else {
+@@ -358,6 +372,7 @@ public final class SharedWakeupManager {
+         self.accountSettingsDisposable?.dispose()
+         self.inForegroundDisposable?.dispose()
+         self.hasActiveAudioSessionDisposable?.dispose()
++        self.ayuSettingsDisposable?.dispose()
+         self.tasksDisposable?.dispose()
+         self.pendingMediaUploadsDisposable?.dispose()
+         self.pendingStoryUploadsDisposable?.dispose()
+@@ -1130,6 +1145,45 @@ public final class SharedWakeupManager {
+             self.silenceAudioRenderer = nil
+             silenceAudioRenderer.stop()
+         }*/
++        
++        // AyuGram "keep alive in background": the silence above, enabled by the setting. Playback mixed with
++        // other audio keeps iOS from suspending the app, and updateAccounts keeps the connection while it plays.
++        if !self.inForeground && self.ayuKeepAliveInBackground && !self.hasActiveAudioSession {
++            if self.silenceAudioRenderer == nil {
++                let silenceAudioRenderer = MediaPlayerAudioRenderer(
++                    audioSession: .custom({ control in
++                        let audioSession = AVAudioSession.sharedInstance()
++                        let _ = try? audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
++                        let _ = try? audioSession.setActive(true)
++                        control.activate()
++                        
++                        return ActionDisposable {
++                            let _ = try? audioSession.setActive(false, options: [.notifyOthersOnDeactivation])
++                        }
++                    }),
++                    forAudioVideoMessage: false,
++                    playAndRecord: false,
++                    useVoiceProcessingMode: false,
++                    soundMuted: false,
++                    ambient: false,
++                    mixWithOthers: true,
++                    forceAudioToSpeaker: false,
++                    baseRate: 1.0,
++                    audioLevelPipe: ValuePipe(),
++                    updatedRate: {},
++                    audioPaused: {}
++                )
++                self.silenceAudioRenderer = silenceAudioRenderer
++                silenceAudioRenderer.start()
++                Logger.shared.log("Wakeup", "AyuGram keep-alive started")
++                self.updateAccounts(hasTasks: hasTasksForBackgroundExtension, endTaskAfterTransactionsComplete: nil)
++            }
++        } else if let silenceAudioRenderer = self.silenceAudioRenderer {
++            self.silenceAudioRenderer = nil
++            silenceAudioRenderer.stop()
++            Logger.shared.log("Wakeup", "AyuGram keep-alive stopped")
++            self.updateAccounts(hasTasks: hasTasksForBackgroundExtension, endTaskAfterTransactionsComplete: nil)
++        }
+     }
+     
+     private func updateAccounts(hasTasks: Bool, endTaskAfterTransactionsComplete: UIBackgroundTaskIdentifier?) {
+@@ -1141,7 +1195,7 @@ public final class SharedWakeupManager {
+             for (account, primary, tasks) in self.accountsAndTasks {
+                 account.postbox.setCanBeginTransactions(true)
+                 
+-                if (self.inForeground && primary) || !tasks.isEmpty || (self.activeExplicitExtensionTimer != nil && primary) {
++                if (self.inForeground && primary) || !tasks.isEmpty || (self.activeExplicitExtensionTimer != nil && primary) || (self.silenceAudioRenderer != nil && primary) {
+                     account.shouldBeServiceTaskMaster.set(.single(.always))
+                 } else {
+                     account.shouldBeServiceTaskMaster.set(.single(.never))
