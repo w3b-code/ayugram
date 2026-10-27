@@ -709,10 +709,10 @@ index bf906980..ee03f18a 100644
      declareEncodable(TelegramMediaStory.self, f: { TelegramMediaStory(decoder: $0) })
 diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
 new file mode 100644
-index 00000000..b1db05f2
+index 00000000..bf2267c6
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,273 @@
 +import Foundation
 +import AyuGramSettings
 +import Postbox
@@ -943,19 +943,35 @@ index 00000000..b1db05f2
 +
 +/// AyuGram's "automatic offline", as AyuGram Desktop does it: whenever the server shows the account
 +/// online while "online" is hidden (after a sent message, say), "offline" goes out.
++///
++/// Telegram keeps the account's own presence at a local, permanent "online" and drops what the server
++/// reports for it. In ghost mode that local value is replaced by "recently" until the server reports
++/// the real status (see `updatePeerPresences`), and put back when ghost mode is turned off.
 +func ayuManagedAutoOffline(postbox: Postbox, network: Network, accountPeerId: PeerId) -> Signal<Never, NoError> {
++    let localPresence = AyuSettings.shared.signal
++    |> map { $0.suppressesOnline }
++    |> distinctUntilChanged
++    |> mapToSignal { suppressesOnline -> Signal<Never, NoError> in
++        return postbox.transaction { transaction -> Void in
++            let status: UserPresenceStatus = suppressesOnline ? .recently(isHidden: false) : .present(until: Int32.max - 1)
++            transaction.updatePeerPresencesInternal(presences: [accountPeerId: TelegramUserPresence(status: status, lastActivity: 0)], merge: { _, updated in return updated })
++        }
++        |> ignoreValues
++    }
++    
 +    let isShownOnline = postbox.peerView(id: accountPeerId)
 +    |> map { view -> Bool in
 +        guard let presence = view.peerPresences[accountPeerId] as? TelegramUserPresence, case let .present(until) = presence.status else {
 +            return false
 +        }
-+        return until > Int32(Date().timeIntervalSince1970)
++        let now = Int32(Date().timeIntervalSince1970)
++        return until > now && until < Int32.max - 1
 +    }
 +    |> distinctUntilChanged
 +    let autoOffline = AyuSettings.shared.signal
 +    |> map { $0.sendsOfflineAfterAction }
 +    |> distinctUntilChanged
-+    return combineLatest(isShownOnline, autoOffline)
++    let sendOffline = combineLatest(isShownOnline, autoOffline)
 +    |> mapToSignal { isShownOnline, autoOffline -> Signal<Never, NoError> in
 +        guard isShownOnline && autoOffline else {
 +            return .complete()
@@ -966,6 +982,9 @@ index 00000000..b1db05f2
 +            return .complete()
 +        }
 +    }
++    
++    return combineLatest(localPresence |> then(.never()), sendOffline |> then(.never()))
++    |> ignoreValues
 +}
 diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
 index 7a8db1d8..ed08fb1e 100644
@@ -1234,6 +1253,38 @@ index 18ce55ee..d69ae42f 100644
      return account.postbox.loadedPeerWithId(messageId.peerId)
      |> take(1)
      |> castError(RequestMessageSelectPollOptionError.self)
+diff --git a/submodules/TelegramCore/Sources/UpdatePeers.swift b/submodules/TelegramCore/Sources/UpdatePeers.swift
+index d90af5f2..394193dd 100644
+--- a/submodules/TelegramCore/Sources/UpdatePeers.swift
++++ b/submodules/TelegramCore/Sources/UpdatePeers.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import Postbox
+ internal import TelegramApi
+ 
+@@ -477,7 +478,11 @@ func updatePeerPresences(transaction: Transaction, accountPeerId: PeerId, peerPr
+         }
+     }
+         
+-    parsedPresences.removeValue(forKey: accountPeerId)
++    // AyuGram: in ghost mode the account keeps the status the server reports for it, instead of
++    // the permanent "online" Telegram sets locally, so the own profile shows what others see.
++    if !AyuSettings.shared.values.suppressesOnline {
++        parsedPresences.removeValue(forKey: accountPeerId)
++    }
+         
+     transaction.updatePeerPresencesInternal(presences: parsedPresences, merge: { previous, updated in
+         if let previous = previous as? TelegramUserPresence, let updated = updated as? TelegramUserPresence, previous.lastActivity != updated.lastActivity {
+@@ -502,7 +507,7 @@ func updatePeerPresencesClean(transaction: Transaction, accountPeerId: PeerId, p
+         }
+     }
+     
+-    if parsedPresences[accountPeerId] != nil {
++    if parsedPresences[accountPeerId] != nil && !AyuSettings.shared.values.suppressesOnline {
+         parsedPresences.removeValue(forKey: accountPeerId)
+     }
+     
 diff --git a/submodules/TelegramPresentationData/BUILD b/submodules/TelegramPresentationData/BUILD
 index 75689afa..8ad0c9ba 100644
 --- a/submodules/TelegramPresentationData/BUILD
