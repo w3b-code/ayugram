@@ -1829,7 +1829,7 @@ index b7c69492..29ca3260 100644
                  } else {
                      account.shouldBeServiceTaskMaster.set(.single(.never))
 diff --git a/submodules/TelegramUI/Sources/TelegramRootController.swift b/submodules/TelegramUI/Sources/TelegramRootController.swift
-index 22ecc718..28bf681b 100644
+index 22ecc718..2e8f0c78 100644
 --- a/submodules/TelegramUI/Sources/TelegramRootController.swift
 +++ b/submodules/TelegramUI/Sources/TelegramRootController.swift
 @@ -1,4 +1,5 @@
@@ -1838,7 +1838,29 @@ index 22ecc718..28bf681b 100644
  import UIKit
  import Display
  import AsyncDisplayKit
-@@ -80,6 +81,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+@@ -71,6 +72,21 @@ private class DetailsChatPlaceholderNode: ASDisplayNode, NavigationDetailsPlaceh
+     }
+ }
+ 
++/// The profile tab icon, drawn like the bundled tab icons: a solid glyph centred on a 30×30 canvas,
++/// which the tab bar uses as a mask and tints with the theme colour.
++private func ayuProfileTabIcon(filled: Bool) -> UIImage? {
++    let configuration = UIImage.SymbolConfiguration(pointSize: 21.0, weight: .medium)
++    guard let symbol = UIImage(systemName: filled ? "person.crop.circle.fill" : "person.crop.circle", withConfiguration: configuration)?.withTintColor(.black, renderingMode: .alwaysOriginal) else {
++        return nil
++    }
++    return generateImage(CGSize(width: 30.0, height: 30.0), rotatedContext: { size, context in
++        context.clear(CGRect(origin: CGPoint(), size: size))
++        UIGraphicsPushContext(context)
++        symbol.draw(in: CGRect(origin: CGPoint(x: (size.width - symbol.size.width) / 2.0, y: (size.height - symbol.size.height) / 2.0), size: symbol.size))
++        UIGraphicsPopContext()
++    })?.withRenderingMode(.alwaysTemplate)
++}
++
+ public final class TelegramRootController: NavigationController, TelegramRootControllerInterface {
+     private let context: AccountContext
+     
+@@ -80,6 +96,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
      public var callListController: CallListController?
      public var chatListController: ChatListController?
      public var accountSettingsController: PeerInfoScreen?
@@ -1846,7 +1868,7 @@ index 22ecc718..28bf681b 100644
      public var newsController: NewsScreen?
      
      private var permissionsDisposable: Disposable?
-@@ -241,9 +243,21 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+@@ -241,9 +258,20 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
          }
          accountSettingsController.parentController = self
          controllers.append(accountSettingsController)
@@ -1855,9 +1877,8 @@ index 22ecc718..28bf681b 100644
 +        if AyuSettings.shared.values.showProfileTab {
 +            let profileController = PeerInfoScreenImpl(context: self.context, updatedPresentationData: nil, peerId: self.context.account.peerId, avatarInitiallyExpanded: false, isOpenedFromChat: false, reactionSourceMessageId: nil, callMessages: [], isMyProfile: true)
 +            profileController.tabBarItem.title = "Профиль"
-+            let profileIcon = UIImage(systemName: "person.crop.circle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22.0, weight: .regular))
-+            profileController.tabBarItem.image = profileIcon
-+            profileController.tabBarItem.selectedImage = UIImage(systemName: "person.crop.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22.0, weight: .regular))
++            profileController.tabBarItem.image = ayuProfileTabIcon(filled: false)
++            profileController.tabBarItem.selectedImage = ayuProfileTabIcon(filled: true)
 +            profileController.parentController = self
 +            controllers.append(profileController)
 +            self.ayuProfileController = profileController
@@ -1869,7 +1890,7 @@ index 22ecc718..28bf681b 100644
          
          self.contactsController = contactsController
          self.callListController = callListController
-@@ -268,6 +282,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+@@ -268,6 +296,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
              controllers.append(newsController)
          }
          controllers.append(self.accountSettingsController!)
