@@ -1348,6 +1348,31 @@ index 0ca07f27..fb69d588 100644
          "//submodules/TelegramIntents",
          "//submodules/TelegramNotices",
          "//submodules/TelegramPresentationData",
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
+index fdc996cb..3815eec4 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import UIKit
+ import AsyncDisplayKit
+ import Display
+@@ -1284,7 +1285,13 @@ final class PeerInfoHeaderNode: ASDisplayNode {
+                 let subtitleColor: UIColor
+                 subtitleColor = .white
+                 
+-                subtitleStringText = presentationData.strings.Presence_online
++                // AyuGram: with "online" hidden, others see the account offline, so the own profile
++                // says so instead of the "online" Telegram always shows here (as AyuGram4A does).
++                if AyuSettings.shared.values.suppressesOnline {
++                    subtitleStringText = "не в сети · режим призрака"
++                } else {
++                    subtitleStringText = presentationData.strings.Presence_online
++                }
+                 subtitleAttributes = MultiScaleTextState.Attributes(font: Font.regular(17.0), color: subtitleColor)
+                 smallSubtitleAttributes = MultiScaleTextState.Attributes(font: Font.regular(16.0), color: .white, shadowColor: titleShadowColor)
+                 
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
 index 34f23770..51d993ab 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
