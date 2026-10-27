@@ -38,10 +38,10 @@ index 00000000..51b43fe9
 +)
 diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 new file mode 100644
-index 00000000..1fb44f92
+index 00000000..a65370bb
 --- /dev/null
 +++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,300 @@
 +import Foundation
 +import SwiftSignalKit
 +
@@ -194,6 +194,9 @@ index 00000000..1fb44f92
 +    private let lock = NSLock()
 +    private var current: AyuSettingsValues
 +    private var storyReadHolds: Int = 0
++    /// Chats read locally while read receipts were held back; their read state still has to
++    /// reach the server.
++    private var ghostReadPeers: Set<Int64>
 +    private let promise: ValuePromise<AyuSettingsValues>
 +
 +    private init() {
@@ -232,6 +235,8 @@ index 00000000..1fb44f92
 +        load("showMessageSeconds", &values.showMessageSeconds)
 +        load("showProfileTab", &values.showProfileTab)
 +        self.current = values
++        let storedPeers = UserDefaults.standard.array(forKey: AyuSettings.keyPrefix + "ghostReadPeers") as? [NSNumber] ?? []
++        self.ghostReadPeers = Set(storedPeers.map { $0.int64Value })
 +        self.promise = ValuePromise(values, ignoreRepeated: true)
 +    }
 +
@@ -270,6 +275,33 @@ index 00000000..1fb44f92
 +        self.lock.lock()
 +        self.storyReadHolds = max(0, self.storyReadHolds - 1)
 +        self.lock.unlock()
++    }
++
++    /// Remembers that `peerId` (a raw peer ID) was read while read receipts were held back.
++    public func noteGhostRead(peerId: Int64) {
++        self.lock.lock()
++        let inserted = self.ghostReadPeers.insert(peerId).inserted
++        let peers = self.ghostReadPeers
++        self.lock.unlock()
++        if inserted {
++            self.storeGhostReadPeers(peers)
++        }
++    }
++
++    /// Whether `peerId` was read while read receipts were held back; forgets it.
++    public func takeGhostRead(peerId: Int64) -> Bool {
++        self.lock.lock()
++        let removed = self.ghostReadPeers.remove(peerId) != nil
++        let peers = self.ghostReadPeers
++        self.lock.unlock()
++        if removed {
++            self.storeGhostReadPeers(peers)
++        }
++        return removed
++    }
++
++    private func storeGhostReadPeers(_ peers: Set<Int64>) {
++        self.defaults.set(peers.map { NSNumber(value: $0) }, forKey: AyuSettings.keyPrefix + "ghostReadPeers")
 +    }
 +
 +    public func update(_ f: (inout AyuSettingsValues) -> Void) {
@@ -439,7 +471,7 @@ index 2b819a9c..0560b7dd 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..4ee828b5
+index 00000000..f077b0ab
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 @@ -0,0 +1,236 @@
@@ -626,7 +658,7 @@ index 00000000..4ee828b5
 +    toggle(.ghostOptions, .sendOnline, "Не отправлять «в сети»", !values.sendOnlinePackets, enabled: ghost)
 +    toggle(.ghostOptions, .sendTyping, "Не отправлять «печатает»", !values.sendUploadProgress, enabled: ghost)
 +    toggle(.ghostOptions, .sendOfflineAfterOnline, "Автоматический «не в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost)
-+    footer(.ghostOptions, "Включённый пункт скрывает действие от собеседников, пока режим призрака включён. «Автоматический „не в сети“» отправляет «не в сети» сразу после «в сети», а также после ваших сообщений и реакций: сервер сам показывает вас в сети, когда вы что-то отправляете. При сворачивании приложения «не в сети» уходит всегда. Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными.")
++    footer(.ghostOptions, "Включённый пункт скрывает действие от собеседников, пока режим призрака включён. «Автоматический „не в сети“» отправляет «не в сети» сразу после «в сети», а также после ваших сообщений и реакций: сервер сам показывает вас в сети, когда вы что-то отправляете. При сворачивании приложения «не в сети» уходит всегда. Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными, пока вы не откроете этот чат с выключенным режимом.")
 +
 +    toggle(.ghostExtras, .markReadAfterAction, "Читать при действиях", values.markReadAfterAction, enabled: ghost)
 +    toggle(.ghostExtras, .suggestGhostForStories, "Предлагать призрака для историй", values.suggestGhostModeBeforeViewingStory)
@@ -1241,6 +1273,33 @@ index 91c5c772..f547444f 100644
          },
          decodeMessageThreadInfo: { entry in
              guard let data = entry.get(MessageHistoryThreadData.self) else {
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift
+index 041f0e62..db81ff58 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift
+@@ -1,5 +1,6 @@
+ import Foundation
+ import Postbox
++import AyuGramSettings
+ internal import TelegramApi
+ import SwiftSignalKit
+ 
+@@ -52,6 +53,15 @@ func _internal_applyMaxReadIndexInteractively(transaction: Transaction, stateMan
+     }
+     let messageIds = transaction.applyInteractiveReadMaxIndex(index)
+     
++    // AyuGram: a chat read in ghost mode stays unread on the server. Once read receipts go out
++    // again, opening it sends the read state the local one already has.
++    let peerIdValue = index.id.peerId.toInt64()
++    if AyuSettings.shared.suppressesFunction("messages.readHistory") {
++        AyuSettings.shared.noteGhostRead(peerId: peerIdValue)
++    } else if AyuSettings.shared.takeGhostRead(peerId: peerIdValue) {
++        let _ = synchronizePeerReadState(network: stateManager.network, postbox: stateManager.postbox, stateManager: stateManager, peerId: index.id.peerId, push: true, validate: false).start()
++    }
++    
+     if let peer = transaction.getPeer(index.id.peerId), peer.isForumOrMonoForum {
+         if let combinedPeerReadState = transaction.getCombinedPeerReadState(peer.id), combinedPeerReadState.count == 0 {
+             for item in transaction.getMessageHistoryThreadIndex(peerId: peer.id, limit: 100) {
 diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/Polls.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/Polls.swift
 index 18ce55ee..d69ae42f 100644
 --- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/Polls.swift
