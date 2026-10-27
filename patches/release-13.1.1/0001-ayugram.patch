@@ -1348,8 +1348,28 @@ index 0ca07f27..fb69d588 100644
          "//submodules/TelegramIntents",
          "//submodules/TelegramNotices",
          "//submodules/TelegramPresentationData",
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
+index 2dcee2d9..9a56f047 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import UIKit
+ import TelegramCore
+ import SwiftSignalKit
+@@ -1266,7 +1267,8 @@ func peerInfoScreenData(
+                     guard let user = view.peers[userPeerId] as? TelegramUser else {
+                         return .none
+                     }
+-                    if user.id == context.account.peerId {
++                    // AyuGram: in ghost mode the own profile shows the status others see.
++                    if user.id == context.account.peerId && !AyuSettings.shared.values.suppressesOnline {
+                         return .none
+                     }
+                     if user.isDeleted {
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
-index fdc996cb..3815eec4 100644
+index fdc996cb..22cdc5ab 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
 +++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
 @@ -1,4 +1,5 @@
@@ -1363,10 +1383,10 @@ index fdc996cb..3815eec4 100644
                  subtitleColor = .white
                  
 -                subtitleStringText = presentationData.strings.Presence_online
-+                // AyuGram: with "online" hidden, others see the account offline, so the own profile
-+                // says so instead of the "online" Telegram always shows here (as AyuGram4A does).
++                // AyuGram: with "online" hidden, the own profile shows the last seen time others see
++                // instead of the "online" Telegram always shows here.
 +                if AyuSettings.shared.values.suppressesOnline {
-+                    subtitleStringText = "не в сети · режим призрака"
++                    subtitleStringText = statusData?.text ?? presentationData.strings.LastSeen_Lately
 +                } else {
 +                    subtitleStringText = presentationData.strings.Presence_online
 +                }
