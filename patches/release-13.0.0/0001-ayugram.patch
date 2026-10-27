@@ -38,10 +38,10 @@ index 00000000..51b43fe9
 +)
 diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 new file mode 100644
-index 00000000..7d6c704c
+index 00000000..1fb44f92
 --- /dev/null
 +++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,268 @@
 +import Foundation
 +import SwiftSignalKit
 +
@@ -97,6 +97,8 @@ index 00000000..7d6c704c
 +    public var disableNumberRounding: Bool
 +    /// 12:34 → 12:34:56 in message times.
 +    public var showMessageSeconds: Bool
++    /// A fifth tab with the account's own profile; read when the tabs are built.
++    public var showProfileTab: Bool
 +
 +    public static let `default` = AyuSettingsValues(
 +        ghostModeEnabled: false,
@@ -117,7 +119,8 @@ index 00000000..7d6c704c
 +        keepAliveInBackground: false,
 +        peerIdFormat: .botApi,
 +        disableNumberRounding: false,
-+        showMessageSeconds: false
++        showMessageSeconds: false,
++        showProfileTab: true
 +    )
 +
 +    /// Whether `name` (a TL function name such as `messages.readHistory`) must not reach the server:
@@ -227,6 +230,7 @@ index 00000000..7d6c704c
 +        }
 +        load("disableNumberRounding", &values.disableNumberRounding)
 +        load("showMessageSeconds", &values.showMessageSeconds)
++        load("showProfileTab", &values.showProfileTab)
 +        self.current = values
 +        self.promise = ValuePromise(values, ignoreRepeated: true)
 +    }
@@ -301,6 +305,7 @@ index 00000000..7d6c704c
 +        storeInt("peerIdFormat", updated.peerIdFormat.rawValue)
 +        store("disableNumberRounding", updated.disableNumberRounding)
 +        store("showMessageSeconds", updated.showMessageSeconds)
++        store("showProfileTab", updated.showProfileTab)
 +
 +        self.promise.set(updated)
 +    }
@@ -434,10 +439,10 @@ index 32438133..45acd0c5 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..2663a4fb
+index 00000000..4ee828b5
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,236 @@
 +import Foundation
 +import UIKit
 +import Display
@@ -486,6 +491,7 @@ index 00000000..2663a4fb
 +    case hideStories
 +    case disableNumberRounding
 +    case showMessageSeconds
++    case showProfileTab
 +
 +    func apply(_ values: inout AyuSettingsValues, _ value: Bool) {
 +        switch self {
@@ -524,6 +530,8 @@ index 00000000..2663a4fb
 +            values.disableNumberRounding = value
 +        case .showMessageSeconds:
 +            values.showMessageSeconds = value
++        case .showProfileTab:
++            values.showProfileTab = value
 +        }
 +    }
 +}
@@ -642,7 +650,8 @@ index 00000000..2663a4fb
 +    toggle(.interface, .hideStories, "Скрыть истории", values.hideStories)
 +    toggle(.interface, .disableNumberRounding, "Отключить округление чисел", values.disableNumberRounding)
 +    toggle(.interface, .showMessageSeconds, "Время с секундами", values.showMessageSeconds)
-+    footer(.interface, "Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56.")
++    toggle(.interface, .showProfileTab, "Вкладка «Профиль»", values.showProfileTab)
++    footer(.interface, "Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек» и включается или выключается после перезапуска приложения.")
 +
 +    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
 +    choice(.peerId, .peerIdFormat(.hidden), "Не показывать", values.peerIdFormat == .hidden)
@@ -1809,6 +1818,56 @@ index b7c69492..29ca3260 100644
                      account.shouldBeServiceTaskMaster.set(.single(.always))
                  } else {
                      account.shouldBeServiceTaskMaster.set(.single(.never))
+diff --git a/submodules/TelegramUI/Sources/TelegramRootController.swift b/submodules/TelegramUI/Sources/TelegramRootController.swift
+index fd20e116..1ac69fb2 100644
+--- a/submodules/TelegramUI/Sources/TelegramRootController.swift
++++ b/submodules/TelegramUI/Sources/TelegramRootController.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import AyuGramSettings
+ import UIKit
+ import Display
+ import AsyncDisplayKit
+@@ -79,6 +80,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+     public var callListController: CallListController?
+     public var chatListController: ChatListController?
+     public var accountSettingsController: PeerInfoScreen?
++    private var ayuProfileController: ViewController?
+     
+     private var permissionsDisposable: Disposable?
+     private var presentationDataDisposable: Disposable?
+@@ -234,8 +236,20 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+         }
+         accountSettingsController.parentController = self
+         controllers.append(accountSettingsController)
++        
++        // AyuGram: a fifth tab, after Settings, with the account's own profile.
++        if AyuSettings.shared.values.showProfileTab {
++            let profileController = PeerInfoScreenImpl(context: self.context, updatedPresentationData: nil, peerId: self.context.account.peerId, avatarInitiallyExpanded: false, isOpenedFromChat: false, reactionSourceMessageId: nil, callMessages: [], isMyProfile: true)
++            profileController.tabBarItem.title = "Профиль"
++            let profileIcon = UIImage(systemName: "person.crop.circle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22.0, weight: .regular))
++            profileController.tabBarItem.image = profileIcon
++            profileController.tabBarItem.selectedImage = profileIcon
++            profileController.parentController = self
++            controllers.append(profileController)
++            self.ayuProfileController = profileController
++        }
+                 
+-        tabBarController.setControllers(controllers, selectedIndex: restoreSettignsController != nil ? (controllers.count - 1) : (controllers.count - 2))
++        tabBarController.setControllers(controllers, selectedIndex: restoreSettignsController != nil ? (controllers.firstIndex(where: { $0 === accountSettingsController }) ?? 0) : (controllers.firstIndex(where: { $0 === chatListController }) ?? 0))
+         
+         self.contactsController = contactsController
+         self.callListController = callListController
+@@ -256,6 +270,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+         }
+         controllers.append(self.chatListController!)
+         controllers.append(self.accountSettingsController!)
++        if let ayuProfileController = self.ayuProfileController {
++            controllers.append(ayuProfileController)
++        }
+         
+         rootTabController.setControllers(controllers, selectedIndex: nil)
+     }
 diff --git a/submodules/TextFormat/BUILD b/submodules/TextFormat/BUILD
 index 74ceb8c7..98eeee29 100644
 --- a/submodules/TextFormat/BUILD
