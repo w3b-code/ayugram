@@ -1512,7 +1512,7 @@ index 34f23770..51d993ab 100644
      enum Section: Int, CaseIterable {
          case notifications
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
-index 2a64e794..5a1fc785 100644
+index 2a64e794..ecc0b83f 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
 +++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift
 @@ -185,6 +185,7 @@ enum PeerInfoSettingsSection {
@@ -1523,6 +1523,16 @@ index 2a64e794..5a1fc785 100644
      case businessSetup
      case profile
      case premiumManagement
+@@ -6697,7 +6698,8 @@ public final class PeerInfoScreenImpl: ViewController, PeerInfoScreen, KeyShortc
+             }
+             
+             self.tabBarItemDisposable = (tabBarItem |> deliverOnMainQueue).startStrict(next: { [weak self] title, image, selectedImage, badgeValue, isAvatar, reduceMotion in
+-                if let strongSelf = self {
++                // AyuGram: the profile tab keeps its own title and icon.
++                if let strongSelf = self, isSettings {
+                     strongSelf.tabBarItem.title = title
+                     strongSelf.tabBarItem.image = image
+                     strongSelf.tabBarItem.selectedImage = selectedImage
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
 index ec998735..ffda22b5 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift
@@ -1819,7 +1829,7 @@ index b7c69492..29ca3260 100644
                  } else {
                      account.shouldBeServiceTaskMaster.set(.single(.never))
 diff --git a/submodules/TelegramUI/Sources/TelegramRootController.swift b/submodules/TelegramUI/Sources/TelegramRootController.swift
-index fd20e116..1ac69fb2 100644
+index fd20e116..0c0c7616 100644
 --- a/submodules/TelegramUI/Sources/TelegramRootController.swift
 +++ b/submodules/TelegramUI/Sources/TelegramRootController.swift
 @@ -1,4 +1,5 @@
@@ -1847,7 +1857,7 @@ index fd20e116..1ac69fb2 100644
 +            profileController.tabBarItem.title = "Профиль"
 +            let profileIcon = UIImage(systemName: "person.crop.circle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22.0, weight: .regular))
 +            profileController.tabBarItem.image = profileIcon
-+            profileController.tabBarItem.selectedImage = profileIcon
++            profileController.tabBarItem.selectedImage = UIImage(systemName: "person.crop.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22.0, weight: .regular))
 +            profileController.parentController = self
 +            controllers.append(profileController)
 +            self.ayuProfileController = profileController
