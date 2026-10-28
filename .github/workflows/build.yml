@@ -41,7 +41,11 @@ jobs:
 
       - name: Select newest Xcode
         run: |
-          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          # Newest release Xcode: betas and release candidates can lack a matching Metal toolchain.
+          XCODE=$(ls -d /Applications/Xcode*.app | grep -viE 'beta|release_candidate|_rc' | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          fi
           echo "Using $XCODE"
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
