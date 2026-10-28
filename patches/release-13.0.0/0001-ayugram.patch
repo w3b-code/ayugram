@@ -485,7 +485,7 @@ index 32438133..45acd0c5 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
 new file mode 100644
-index 00000000..e8fdd599
+index 00000000..56cf79d6
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
 @@ -0,0 +1,219 @@
@@ -574,7 +574,7 @@ index 00000000..e8fdd599
 +    configuration.httpCookieStorage = nil
 +    configuration.urlCache = nil
 +    if let proxy = proxy, case let .socks5(username, password) = proxy.connection, #available(iOS 17.0, *), let port = NWEndpoint.Port(rawValue: UInt16(clamping: proxy.port)) {
-+        var proxyConfiguration = ProxyConfiguration(socksv5Proxy: .hostPort(host: NWEndpoint.Host(proxy.host), port: port))
++        let proxyConfiguration = ProxyConfiguration(socksv5Proxy: .hostPort(host: NWEndpoint.Host(proxy.host), port: port))
 +        if let username = username, let password = password, !username.isEmpty {
 +            proxyConfiguration.applyCredential(username: username, password: password)
 +        }
