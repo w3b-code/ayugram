@@ -471,7 +471,7 @@ index 2b819a9c..0560b7dd 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..f077b0ab
+index 00000000..ab9ebc3f
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 @@ -0,0 +1,236 @@
@@ -683,7 +683,7 @@ index 00000000..f077b0ab
 +    toggle(.interface, .disableNumberRounding, "Отключить округление чисел", values.disableNumberRounding)
 +    toggle(.interface, .showMessageSeconds, "Время с секундами", values.showMessageSeconds)
 +    toggle(.interface, .showProfileTab, "Вкладка «Профиль»", values.showProfileTab)
-+    footer(.interface, "Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек» и включается или выключается после перезапуска приложения.")
++    footer(.interface, "Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек».")
 +
 +    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
 +    choice(.peerId, .peerIdFormat(.hidden), "Не показывать", values.peerIdFormat == .hidden)
@@ -1736,6 +1736,29 @@ index 78727862..f5b69a41 100644
          }
      }
  
+diff --git a/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarItemsLayout.swift b/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarItemsLayout.swift
+index 6f9d6222..20603ce4 100644
+--- a/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarItemsLayout.swift
++++ b/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarItemsLayout.swift
+@@ -49,8 +49,16 @@ public func tabBarItemsLayout(axis: TabBarAxis, isCompact: Bool, unboundItemWidt
+         if unboundItemWidths.allSatisfy({ $0 <= equalLength }) {
+             lengths = Array(repeating: equalLength, count: count)
+         } else {
+-            let weight = availableItemsLength / unboundItemWidths.reduce(0.0, +)
+-            lengths = unboundItemWidths.map { floorToScreenPixels($0 * weight) }
++            let unboundItemsLength = unboundItemWidths.reduce(0.0, +)
++            // AyuGram: with room to spare, every item gets the same extra length, so the gaps between
++            // titles are even rather than growing with the longer titles.
++            let sharedExtraLength = floorToScreenPixels((availableItemsLength - unboundItemsLength) / CGFloat(count))
++            if sharedExtraLength >= 0.0 {
++                lengths = unboundItemWidths.map { floorToScreenPixels($0 + sharedExtraLength) }
++            } else {
++                let weight = availableItemsLength / unboundItemsLength
++                lengths = unboundItemWidths.map { floorToScreenPixels($0 * weight) }
++            }
+         }
+     } else if axis == .horizontal && isCompact && count != 0 && availableLength - (CGFloat(count) * tabBarItemLength + tabBarInnerInset * 2.0) < tabBarCompactFillThreshold {
+         let equalLength = floorToScreenPixels((availableLength - tabBarInnerInset * 2.0) / CGFloat(count))
 diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
 index 1ceb46bc..80b84def 100644
 --- a/submodules/TelegramUI/Sources/AppDelegate.swift
@@ -1888,7 +1911,7 @@ index b7c69492..29ca3260 100644
                  } else {
                      account.shouldBeServiceTaskMaster.set(.single(.never))
 diff --git a/submodules/TelegramUI/Sources/TelegramRootController.swift b/submodules/TelegramUI/Sources/TelegramRootController.swift
-index 22ecc718..2e8f0c78 100644
+index 22ecc718..9a36675e 100644
 --- a/submodules/TelegramUI/Sources/TelegramRootController.swift
 +++ b/submodules/TelegramUI/Sources/TelegramRootController.swift
 @@ -1,4 +1,5 @@
@@ -1897,18 +1920,19 @@ index 22ecc718..2e8f0c78 100644
  import UIKit
  import Display
  import AsyncDisplayKit
-@@ -71,6 +72,21 @@ private class DetailsChatPlaceholderNode: ASDisplayNode, NavigationDetailsPlaceh
+@@ -71,6 +72,22 @@ private class DetailsChatPlaceholderNode: ASDisplayNode, NavigationDetailsPlaceh
      }
  }
  
-+/// The profile tab icon, drawn like the bundled tab icons: a solid glyph centred on a 30×30 canvas,
-+/// which the tab bar uses as a mask and tints with the theme colour.
++/// The profile tab icon: a solid glyph that the tab bar tints with the theme colour. The other tabs
++/// are 48 pt animations drawn from y = -4 (centre at 20); an image is drawn from y = 3, so a 34 pt
++/// tall canvas puts this glyph's centre on the same line.
 +private func ayuProfileTabIcon(filled: Bool) -> UIImage? {
 +    let configuration = UIImage.SymbolConfiguration(pointSize: 21.0, weight: .medium)
 +    guard let symbol = UIImage(systemName: filled ? "person.crop.circle.fill" : "person.crop.circle", withConfiguration: configuration)?.withTintColor(.black, renderingMode: .alwaysOriginal) else {
 +        return nil
 +    }
-+    return generateImage(CGSize(width: 30.0, height: 30.0), rotatedContext: { size, context in
++    return generateImage(CGSize(width: 30.0, height: 34.0), rotatedContext: { size, context in
 +        context.clear(CGRect(origin: CGPoint(), size: size))
 +        UIGraphicsPushContext(context)
 +        symbol.draw(in: CGRect(origin: CGPoint(x: (size.width - symbol.size.width) / 2.0, y: (size.height - symbol.size.height) / 2.0), size: symbol.size))
@@ -1919,26 +1943,31 @@ index 22ecc718..2e8f0c78 100644
  public final class TelegramRootController: NavigationController, TelegramRootControllerInterface {
      private let context: AccountContext
      
-@@ -80,6 +96,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+@@ -80,6 +97,8 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
      public var callListController: CallListController?
      public var chatListController: ChatListController?
      public var accountSettingsController: PeerInfoScreen?
 +    private var ayuProfileController: ViewController?
++    private var ayuProfileTabDisposable: Disposable?
      public var newsController: NewsScreen?
      
      private var permissionsDisposable: Disposable?
-@@ -241,9 +258,20 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+@@ -144,6 +163,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+     }
+     
+     deinit {
++        self.ayuProfileTabDisposable?.dispose()
+         self.permissionsDisposable?.dispose()
+         self.presentationDataDisposable?.dispose()
+         self.applicationInFocusDisposable?.dispose()
+@@ -241,9 +261,16 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
          }
          accountSettingsController.parentController = self
          controllers.append(accountSettingsController)
 +        
 +        // AyuGram: a fifth tab, after Settings, with the account's own profile.
 +        if AyuSettings.shared.values.showProfileTab {
-+            let profileController = PeerInfoScreenImpl(context: self.context, updatedPresentationData: nil, peerId: self.context.account.peerId, avatarInitiallyExpanded: false, isOpenedFromChat: false, reactionSourceMessageId: nil, callMessages: [], isMyProfile: true)
-+            profileController.tabBarItem.title = "Профиль"
-+            profileController.tabBarItem.image = ayuProfileTabIcon(filled: false)
-+            profileController.tabBarItem.selectedImage = ayuProfileTabIcon(filled: true)
-+            profileController.parentController = self
++            let profileController = self.ayuMakeProfileController()
 +            controllers.append(profileController)
 +            self.ayuProfileController = profileController
 +        }
@@ -1949,7 +1978,62 @@ index 22ecc718..2e8f0c78 100644
          
          self.contactsController = contactsController
          self.callListController = callListController
-@@ -268,6 +296,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+@@ -252,6 +279,54 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+         self.accountSettingsController = accountSettingsController
+         self.rootTabController = tabBarController
+         self.pushViewController(tabBarController, animated: false)
++        
++        self.ayuProfileTabDisposable?.dispose()
++        self.ayuProfileTabDisposable = (AyuSettings.shared.signal
++        |> map { $0.showProfileTab }
++        |> distinctUntilChanged
++        |> deliverOnMainQueue).startStrict(next: { [weak self] show in
++            self?.ayuSetProfileTabVisible(show)
++        })
++    }
++    
++    private func ayuMakeProfileController() -> ViewController {
++        let profileController = PeerInfoScreenImpl(context: self.context, updatedPresentationData: nil, peerId: self.context.account.peerId, avatarInitiallyExpanded: false, isOpenedFromChat: false, reactionSourceMessageId: nil, callMessages: [], isMyProfile: true)
++        profileController.tabBarItem.title = "Профиль"
++        profileController.tabBarItem.image = ayuProfileTabIcon(filled: false)
++        profileController.tabBarItem.selectedImage = ayuProfileTabIcon(filled: true)
++        profileController.parentController = self
++        return profileController
++    }
++    
++    /// Adds or removes the profile tab when the setting changes, without a restart.
++    private func ayuSetProfileTabVisible(_ show: Bool) {
++        guard let rootTabController = self.rootTabController as? TabBarControllerImpl else {
++            return
++        }
++        var controllers = rootTabController.controllers
++        if show {
++            guard self.ayuProfileController == nil else {
++                return
++            }
++            let profileController = self.ayuMakeProfileController()
++            if let settingsIndex = controllers.firstIndex(where: { $0 === self.accountSettingsController }) {
++                controllers.insert(profileController, at: settingsIndex + 1)
++            } else {
++                controllers.append(profileController)
++            }
++            self.ayuProfileController = profileController
++        } else {
++            guard let profileController = self.ayuProfileController else {
++                return
++            }
++            controllers.removeAll(where: { $0 === profileController })
++            self.ayuProfileController = nil
++        }
++        var selectedIndex: Int?
++        if let currentController = rootTabController.currentController, !controllers.contains(where: { $0 === currentController }) {
++            selectedIndex = controllers.firstIndex(where: { $0 === self.chatListController })
++        }
++        rootTabController.setControllers(controllers, selectedIndex: selectedIndex)
+     }
+         
+     public func updateRootControllers(showCallsTab: Bool, showNewsTab: Bool) {
+@@ -268,6 +343,9 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
              controllers.append(newsController)
          }
          controllers.append(self.accountSettingsController!)
