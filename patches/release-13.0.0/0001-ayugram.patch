@@ -2185,7 +2185,7 @@ index ce0c8011..3a31442f 100644
                  smallSubtitleAttributes = MultiScaleTextState.Attributes(font: Font.regular(16.0), color: .white, shadowColor: titleShadowColor)
                  
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
-index 34f23770..51d993ab 100644
+index 34f23770..ae102ec7 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
 +++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift
 @@ -1,5 +1,6 @@
@@ -2195,22 +2195,30 @@ index 34f23770..51d993ab 100644
  import Display
  import AccountContext
  import TelegramPresentationData
-@@ -900,6 +901,14 @@ func infoItems(
+@@ -900,6 +901,22 @@ func infoItems(
          }
      }
      
 +    // AyuGram: the peer's ID and the data center its profile photo is on; a tap copies the ID.
++    // It is the last row of the info card, above the footnotes that close the section (a bot's
++    // mini app terms): after them it would sit outside the card and pull them into it.
 +    if let peer = data.peer, let idText = ayuPeerIdText(peer: peer, format: AyuSettings.shared.values.peerIdFormat) {
-+        items[.peerInfo]!.append(PeerInfoScreenLabeledValueItem(id: 99000, label: "ID", text: idText.display, textColor: .primary, action: { _, _ in
++        var peerInfoItems = items[.peerInfo] ?? []
++        var insertIndex = peerInfoItems.count
++        while insertIndex > 0 && peerInfoItems[insertIndex - 1] is PeerInfoScreenCommentItem {
++            insertIndex -= 1
++        }
++        peerInfoItems.insert(PeerInfoScreenLabeledValueItem(id: 99000, label: "ID", text: idText.display, textColor: .primary, action: { _, _ in
 +            UIPasteboard.general.string = idText.copy
 +        }, requestLayout: { _ in
-+        }))
++        }), at: insertIndex)
++        items[.peerInfo] = peerInfoItems
 +    }
 +    
      var result: [(AnyHashable, [PeerInfoScreenItem])] = []
      for section in InfoSection.allCases {
          if let sectionItems = items[section], !sectionItems.isEmpty {
-@@ -909,6 +918,31 @@ func infoItems(
+@@ -909,6 +926,31 @@ func infoItems(
      return result
  }
  
