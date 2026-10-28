@@ -38,10 +38,10 @@ index 00000000..51b43fe9
 +)
 diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
 new file mode 100644
-index 00000000..a65370bb
+index 00000000..f18d92bb
 --- /dev/null
 +++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,314 @@
 +import Foundation
 +import SwiftSignalKit
 +
@@ -100,6 +100,12 @@ index 00000000..a65370bb
 +    /// A fifth tab with the account's own profile; read when the tabs are built.
 +    public var showProfileTab: Bool
 +
++    // Neural network.
++    /// Adds "Neural network" to the message menu: a summary of the message or an answer to it.
++    public var aiEnabled: Bool
++    /// The user's Google AI Studio (Gemini API) key.
++    public var aiApiKey: String
++
 +    public static let `default` = AyuSettingsValues(
 +        ghostModeEnabled: false,
 +        sendReadMessagePackets: false,
@@ -120,7 +126,9 @@ index 00000000..a65370bb
 +        peerIdFormat: .botApi,
 +        disableNumberRounding: false,
 +        showMessageSeconds: false,
-+        showProfileTab: true
++        showProfileTab: true,
++        aiEnabled: false,
++        aiApiKey: ""
 +    )
 +
 +    /// Whether `name` (a TL function name such as `messages.readHistory`) must not reach the server:
@@ -234,6 +242,10 @@ index 00000000..a65370bb
 +        load("disableNumberRounding", &values.disableNumberRounding)
 +        load("showMessageSeconds", &values.showMessageSeconds)
 +        load("showProfileTab", &values.showProfileTab)
++        load("aiEnabled", &values.aiEnabled)
++        if let apiKey = UserDefaults.standard.string(forKey: AyuSettings.keyPrefix + "aiApiKey") {
++            values.aiApiKey = apiKey
++        }
 +        self.current = values
 +        let storedPeers = UserDefaults.standard.array(forKey: AyuSettings.keyPrefix + "ghostReadPeers") as? [NSNumber] ?? []
 +        self.ghostReadPeers = Set(storedPeers.map { $0.int64Value })
@@ -338,6 +350,8 @@ index 00000000..a65370bb
 +        store("disableNumberRounding", updated.disableNumberRounding)
 +        store("showMessageSeconds", updated.showMessageSeconds)
 +        store("showProfileTab", updated.showProfileTab)
++        store("aiEnabled", updated.aiEnabled)
++        defaults.set(updated.aiApiKey, forKey: AyuSettings.keyPrefix + "aiApiKey")
 +
 +        self.promise.set(updated)
 +    }
@@ -469,12 +483,214 @@ index 2b819a9c..0560b7dd 100644
          "//submodules/ItemListStickerPackItem:ItemListStickerPackItem",
          "//submodules/ItemListPeerItem:ItemListPeerItem",
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
+new file mode 100644
+index 00000000..078feb4b
+--- /dev/null
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
+@@ -0,0 +1,196 @@
++import Foundation
++import UIKit
++import AyuGramSettings
++
++/// What the neural network does with a message.
++public enum AyuAIAction {
++    case summarize
++    case answer
++
++    public var title: String {
++        switch self {
++        case .summarize:
++            return "Пересказать кратко"
++        case .answer:
++            return "Ответить на вопрос"
++        }
++    }
++
++    fileprivate var instruction: String {
++        switch self {
++        case .summarize:
++            return "Кратко перескажи текст сообщения: главное, в 2–5 предложениях. Отвечай на русском языке, простым текстом без разметки."
++        case .answer:
++            return "Ответь на вопрос из сообщения по существу и кратко. Если вопроса нет, ответь на главное, о чём в нём говорится. Отвечай на русском языке, простым текстом без разметки."
++        }
++    }
++}
++
++/// Removes what could identify people before a text leaves the device: the given names (the
++/// sender's, the chat's, the account's), @usernames, Telegram links, e-mail addresses, phone
++/// numbers and long numbers such as IDs.
++public func ayuAIAnonymize(_ text: String, names: [String]) -> String {
++    var result = text
++    // Longer names first, so "Ivan Petrov" goes before "Ivan".
++    for name in Set(names.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }).sorted(by: { $0.count > $1.count }) where name.count >= 2 {
++        result = result.replacingOccurrences(of: name, with: "[имя]", options: [.caseInsensitive])
++    }
++    let patterns: [(String, String)] = [
++        ("(?i)(https?://)?(t\\.me|telegram\\.me|telegram\\.dog)/\\S+", "[ссылка]"),
++        ("(?i)tg://\\S+", "[ссылка]"),
++        ("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[email]"),
++        ("@[A-Za-z0-9_]{3,}", "@user"),
++        ("\\+?\\d[\\d\\s()-]{8,}\\d", "[номер]"),
++        ("\\b\\d{7,}\\b", "[номер]")
++    ]
++    for (pattern, replacement) in patterns {
++        if let regex = try? NSRegularExpression(pattern: pattern) {
++            result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: replacement)
++        }
++    }
++    return result
++}
++
++/// Sends only the anonymized message text and the instruction to the Gemini API. No account,
++/// chat or device data goes with it: an ephemeral session without cookies or cache, and the key in
++/// a header rather than the URL.
++private func ayuAIRequest(action: AyuAIAction, text: String, apiKey: String, models: [String], completion: @escaping (String?, String?) -> Void) {
++    guard let model = models.first, let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent") else {
++        completion(nil, "Модель недоступна.")
++        return
++    }
++    let body: [String: Any] = [
++        "systemInstruction": ["parts": [["text": action.instruction]]],
++        "contents": [["role": "user", "parts": [["text": text]]]],
++        "generationConfig": ["temperature": 0.3, "maxOutputTokens": 1024]
++    ]
++    var request = URLRequest(url: url, timeoutInterval: 60.0)
++    request.httpMethod = "POST"
++    request.httpShouldHandleCookies = false
++    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
++    request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
++    request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
++    request.httpBody = try? JSONSerialization.data(withJSONObject: body)
++
++    let configuration = URLSessionConfiguration.ephemeral
++    configuration.httpCookieStorage = nil
++    configuration.urlCache = nil
++    let session = URLSession(configuration: configuration)
++    session.dataTask(with: request, completionHandler: { data, response, error in
++        session.finishTasksAndInvalidate()
++        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
++        let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
++        if status == 404 && models.count > 1 {
++            ayuAIRequest(action: action, text: text, apiKey: apiKey, models: Array(models.dropFirst()), completion: completion)
++            return
++        }
++        if let error = error {
++            completion(nil, "Нет соединения с Google: \(error.localizedDescription)")
++            return
++        }
++        if let candidates = json?["candidates"] as? [[String: Any]], let content = candidates.first?["content"] as? [String: Any], let parts = content["parts"] as? [[String: Any]] {
++            let answer = parts.compactMap { $0["text"] as? String }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
++            if !answer.isEmpty {
++                completion(answer, nil)
++                return
++            }
++        }
++        if let errorObject = json?["error"] as? [String: Any], let message = errorObject["message"] as? String {
++            completion(nil, "Ошибка Google (\(status)): \(message)")
++        } else {
++            completion(nil, "Нейросеть не дала ответа (код \(status)).")
++        }
++    }).resume()
++}
++
++private final class AyuAIResultController: UIViewController {
++    private let textView = UITextView()
++    private let activityIndicator = UIActivityIndicatorView(style: .large)
++
++    init(title: String) {
++        super.init(nibName: nil, bundle: nil)
++        self.title = title
++    }
++
++    required init?(coder: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    override func viewDidLoad() {
++        super.viewDidLoad()
++        self.view.backgroundColor = .systemBackground
++        self.navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Закрыть", style: .plain, target: self, action: #selector(self.closePressed))
++        self.navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Копировать", style: .plain, target: self, action: #selector(self.copyPressed))
++        self.navigationItem.rightBarButtonItem?.isEnabled = false
++
++        self.textView.isEditable = false
++        self.textView.font = UIFont.preferredFont(forTextStyle: .body)
++        self.textView.textContainerInset = UIEdgeInsets(top: 16.0, left: 12.0, bottom: 16.0, right: 12.0)
++        self.textView.translatesAutoresizingMaskIntoConstraints = false
++        self.view.addSubview(self.textView)
++
++        self.activityIndicator.translatesAutoresizingMaskIntoConstraints = false
++        self.activityIndicator.startAnimating()
++        self.view.addSubview(self.activityIndicator)
++
++        NSLayoutConstraint.activate([
++            self.textView.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.topAnchor),
++            self.textView.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
++            self.textView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
++            self.textView.trailingAnchor.constraint(equalTo: self.view.trailingAnchor),
++            self.activityIndicator.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
++            self.activityIndicator.topAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.topAnchor, constant: 40.0)
++        ])
++    }
++
++    func show(text: String, isError: Bool) {
++        self.loadViewIfNeeded()
++        self.activityIndicator.stopAnimating()
++        self.activityIndicator.isHidden = true
++        self.textView.text = text
++        self.textView.textColor = isError ? .systemRed : .label
++        self.navigationItem.rightBarButtonItem?.isEnabled = !isError
++    }
++
++    @objc private func closePressed() {
++        self.dismiss(animated: true)
++    }
++
++    @objc private func copyPressed() {
++        UIPasteboard.general.string = self.textView.text
++    }
++}
++
++/// Opens a sheet over `window` and fills it with the network's answer about `text`. `names` are the
++/// names to strip from the text first.
++public func ayuAIPresent(action: AyuAIAction, text: String, names: [String], window: UIWindow?) {
++    guard var presenter = window?.rootViewController else {
++        return
++    }
++    while let presented = presenter.presentedViewController {
++        presenter = presented
++    }
++    let resultController = AyuAIResultController(title: action.title)
++    let navigationController = UINavigationController(rootViewController: resultController)
++    if let sheet = navigationController.sheetPresentationController {
++        sheet.detents = [.medium(), .large()]
++        sheet.prefersGrabberVisible = true
++    }
++    presenter.present(navigationController, animated: true)
++
++    let apiKey = AyuSettings.shared.values.aiApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
++    guard !apiKey.isEmpty else {
++        resultController.show(text: "Добавьте API-ключ: Настройки → AyuGram → Нейросеть.", isError: true)
++        return
++    }
++    let anonymized = ayuAIAnonymize(text, names: names)
++    ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: ["gemini-flash-latest", "gemini-2.5-flash"], completion: { [weak resultController] answer, error in
++        DispatchQueue.main.async {
++            if let answer = answer {
++                resultController?.show(text: answer, isError: false)
++            } else {
++                resultController?.show(text: error ?? "Неизвестная ошибка.", isError: true)
++            }
++        }
++    })
++}
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..ab9ebc3f
+index 00000000..6f75b75c
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,252 @@
 +import Foundation
 +import UIKit
 +import Display
@@ -501,6 +717,7 @@ index 00000000..ab9ebc3f
 +    case sendWithoutSound
 +    case saving
 +    case interface
++    case ai
 +    case peerId
 +}
 +
@@ -524,6 +741,7 @@ index 00000000..ab9ebc3f
 +    case disableNumberRounding
 +    case showMessageSeconds
 +    case showProfileTab
++    case ai
 +
 +    func apply(_ values: inout AyuSettingsValues, _ value: Bool) {
 +        switch self {
@@ -564,6 +782,8 @@ index 00000000..ab9ebc3f
 +            values.showMessageSeconds = value
 +        case .showProfileTab:
 +            values.showProfileTab = value
++        case .ai:
++            values.aiEnabled = value
 +        }
 +    }
 +}
@@ -588,17 +808,18 @@ index 00000000..ab9ebc3f
 +    case toggle(id: Int32, section: AyuGramSettingsSection, toggle: AyuGramToggle, title: String, value: Bool, enabled: Bool)
 +    case choice(id: Int32, section: AyuGramSettingsSection, choice: AyuGramChoice, title: String, checked: Bool)
 +    case footer(id: Int32, section: AyuGramSettingsSection, text: String)
++    case apiKey(id: Int32, section: AyuGramSettingsSection, text: String)
 +
 +    var section: ItemListSectionId {
 +        switch self {
-+        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _):
++        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _):
 +            return section.rawValue
 +        }
 +    }
 +
 +    var stableId: Int32 {
 +        switch self {
-+        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _):
++        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _):
 +            return id
 +        }
 +    }
@@ -622,6 +843,10 @@ index 00000000..ab9ebc3f
 +            })
 +        case let .footer(_, _, text):
 +            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        case let .apiKey(_, _, text):
++            return ItemListSingleLineInputItem(presentationData: presentationData, systemStyle: .glass, title: NSAttributedString(), text: text, placeholder: "API-ключ Google AI Studio", type: .password, clearType: .always, sectionId: self.section, textUpdated: { value in
++                arguments.update { $0.aiApiKey = value }
++            }, action: {})
 +        }
 +    }
 +}
@@ -684,6 +909,13 @@ index 00000000..ab9ebc3f
 +    toggle(.interface, .showMessageSeconds, "Время с секундами", values.showMessageSeconds)
 +    toggle(.interface, .showProfileTab, "Вкладка «Профиль»", values.showProfileTab)
 +    footer(.interface, "Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек».")
++
++    header(.ai, "НЕЙРОСЕТЬ")
++    toggle(.ai, .ai, "Нейросеть (Google Gemini)", values.aiEnabled)
++    if values.aiEnabled {
++        add { .apiKey(id: $0, section: .ai, text: values.aiApiKey) }
++    }
++    footer(.ai, "В меню сообщения появится «Нейросеть»: краткий пересказ или ответ на вопрос из сообщения. Бесплатный ключ: aistudio.google.com → Get API key.\n\nВ Google уходит только текст выбранного сообщения. Имена, @юзернеймы, ссылки t.me, номера телефонов, e-mail и длинные числа (ID) заменяются заглушками; имя чата, автор, ваш аккаунт и ID не отправляются. На бесплатном тарифе Google может использовать присланные тексты для улучшения своих моделей, поэтому не отправляйте личное.")
 +
 +    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
 +    choice(.peerId, .peerIdFormat(.hidden), "Не показывать", values.peerIdFormat == .hidden)
@@ -1781,10 +2013,18 @@ index 1ceb46bc..80b84def 100644
          self.buildConfig = buildConfig
          let signatureDict = BuildConfigExtra.signatureDict()
 diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
-index 1ade8c01..435569b7 100644
+index 1ade8c01..cf7c320b 100644
 --- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 +++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
-@@ -1348,6 +1348,23 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+@@ -31,6 +31,7 @@ import Pasteboard
+ import BrowserUI
+ import ChatRichTextEditorComposer
+ import SettingsUI
++import AyuGramSettings
+ import TextNodeWithEntities
+ import ChatControllerInteraction
+ import ChatMessageItemCommon
+@@ -1348,6 +1349,65 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
          }
          
          let isCopyProtected = chatPresentationInterfaceState.copyProtectionEnabled || message.isCopyProtected()
@@ -1803,6 +2043,48 @@ index 1ade8c01..435569b7 100644
 +                    text += "Сейчас:\n\(message.text)"
 +                    controllerInteraction.presentController(textAlertController(context: context, title: "История правок", text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_OK, action: {})]), nil)
 +                })
++            })))
++        }
++        // AyuGram: a summary of the message, or an answer to it, from the user's Gemini key.
++        let ayuValues = AyuSettings.shared.values
++        if ayuValues.aiEnabled, !message.text.isEmpty {
++            let aiText = message.text
++            // Names that must not reach Google: everyone the message refers to, and the account.
++            var aiNames: [String] = []
++            var aiPeers = Array(message.peers.map { $0.1 })
++            if let author = message.author {
++                aiPeers.append(author)
++            }
++            for peer in aiPeers {
++                if let user = peer as? TelegramUser {
++                    aiNames.append(contentsOf: [user.firstName, user.lastName].compactMap { $0 })
++                    aiNames.append(contentsOf: user.usernames.map { $0.username })
++                } else {
++                    aiNames.append(EnginePeer(peer).compactDisplayTitle)
++                    aiNames.append(contentsOf: peer.usernames.map { $0.username })
++                }
++            }
++            let aiWindow = context.sharedContext.mainWindow?.hostView.containerView.window
++            actions.append(.action(ContextMenuActionItem(text: "Нейросеть", icon: { theme in
++                return generateTintedImage(image: UIImage(systemName: "sparkles", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18.0, weight: .regular)), color: theme.actionSheet.primaryTextColor)
++            }, action: { c, _ in
++                var subItems: [ContextMenuItem] = []
++                subItems.append(.action(ContextMenuActionItem(text: chatPresentationInterfaceState.strings.Common_Back, icon: { theme in
++                    return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Back"), color: theme.actionSheet.primaryTextColor)
++                }, iconPosition: .left, action: { c, _ in
++                    c?.popItems()
++                })))
++                subItems.append(.separator)
++                for aiAction in [AyuAIAction.summarize, AyuAIAction.answer] {
++                    subItems.append(.action(ContextMenuActionItem(text: aiAction.title, icon: { _ in
++                        return nil
++                    }, action: { c, _ in
++                        c?.dismiss(completion: {
++                            ayuAIPresent(action: aiAction, text: aiText, names: aiNames, window: aiWindow)
++                        })
++                    })))
++                }
++                c?.pushItems(items: .single(ContextController.Items(content: .list(subItems))))
 +            })))
 +        }
          if !messageText.isEmpty || richMessageMarkdown != nil || (resourceAvailable && isImage) || diceEmoji != nil {
