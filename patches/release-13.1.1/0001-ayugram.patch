@@ -485,10 +485,10 @@ index 2b819a9c..0560b7dd 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
 new file mode 100644
-index 00000000..56cf79d6
+index 00000000..2112aaa6
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,254 @@
 +import Foundation
 +import UIKit
 +import Network
@@ -585,7 +585,8 @@ index 00000000..56cf79d6
 +        session.finishTasksAndInvalidate()
 +        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
 +        let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
-+        if status == 404 && models.count > 1 {
++        // Unknown, overloaded or over-quota model: the next one has its own capacity and limits.
++        if [404, 429, 500, 503].contains(status) && models.count > 1 {
 +            ayuAIRequest(action: action, text: text, apiKey: apiKey, models: Array(models.dropFirst()), proxy: proxy, completion: completion)
 +            return
 +        }
@@ -605,7 +606,16 @@ index 00000000..56cf79d6
 +                completion(nil, "Google не работает в вашей стране. Включите VPN или SOCKS5-прокси в настройках Telegram (MTProto-прокси не подходит).\n\n\(message)")
 +                return
 +            }
-+            completion(nil, "Ошибка Google (\(status)): \(message)")
++            switch status {
++            case 503, 500:
++                completion(nil, "Серверы Google сейчас перегружены. Нажмите «Повторить» через минуту.\n\n\(message)")
++            case 429:
++                completion(nil, "Исчерпан лимит бесплатных запросов. Попробуйте позже.\n\n\(message)")
++            case 400, 403:
++                completion(nil, "Google не принял ключ. Проверьте API-ключ в настройках.\n\n\(message)")
++            default:
++                completion(nil, "Ошибка Google (\(status)): \(message)")
++            }
 +        } else {
 +            completion(nil, "Нейросеть не дала ответа (код \(status)).")
 +        }
@@ -615,6 +625,9 @@ index 00000000..56cf79d6
 +private final class AyuAIResultController: UIViewController {
 +    private let textView = UITextView()
 +    private let activityIndicator = UIActivityIndicatorView(style: .large)
++    /// Sends the request again; offered after an error.
++    var retry: (() -> Void)?
++    private var showsRetry = false
 +
 +    init(title: String) {
 +        super.init(nibName: nil, bundle: nil)
@@ -658,7 +671,19 @@ index 00000000..56cf79d6
 +        self.activityIndicator.isHidden = true
 +        self.textView.text = text
 +        self.textView.textColor = isError ? .systemRed : .label
-+        self.navigationItem.rightBarButtonItem?.isEnabled = !isError
++        self.showsRetry = isError && self.retry != nil
++        self.navigationItem.rightBarButtonItem?.title = self.showsRetry ? "Повторить" : "Копировать"
++        self.navigationItem.rightBarButtonItem?.isEnabled = !isError || self.showsRetry
++    }
++
++    func showLoading() {
++        self.loadViewIfNeeded()
++        self.textView.text = ""
++        self.activityIndicator.isHidden = false
++        self.activityIndicator.startAnimating()
++        self.showsRetry = false
++        self.navigationItem.rightBarButtonItem?.title = "Копировать"
++        self.navigationItem.rightBarButtonItem?.isEnabled = false
 +    }
 +
 +    @objc private func closePressed() {
@@ -666,7 +691,12 @@ index 00000000..56cf79d6
 +    }
 +
 +    @objc private func copyPressed() {
-+        UIPasteboard.general.string = self.textView.text
++        if self.showsRetry {
++            self.showLoading()
++            self.retry?()
++        } else {
++            UIPasteboard.general.string = self.textView.text
++        }
 +    }
 +}
 +
@@ -693,20 +723,25 @@ index 00000000..56cf79d6
 +        return
 +    }
 +    let anonymized = ayuAIAnonymize(text, names: names)
-+    let _ = (context.sharedContext.accountManager.sharedData(keys: [SharedDataKeys.proxySettings])
-+    |> take(1)
-+    |> deliverOnMainQueue).start(next: { [weak resultController] sharedData in
-+        let proxy = sharedData.entries[SharedDataKeys.proxySettings]?.get(ProxySettings.self)?.effectiveActiveServer
-+        ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: ["gemini-flash-latest", "gemini-2.5-flash"], proxy: proxy, completion: { [weak resultController] answer, error in
-+            DispatchQueue.main.async {
-+                if let answer = answer {
-+                    resultController?.show(text: answer, isError: false)
-+                } else {
-+                    resultController?.show(text: error ?? "Неизвестная ошибка.", isError: true)
++    let models = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-flash-lite"]
++    let run: () -> Void = { [weak resultController] in
++        let _ = (context.sharedContext.accountManager.sharedData(keys: [SharedDataKeys.proxySettings])
++        |> take(1)
++        |> deliverOnMainQueue).start(next: { sharedData in
++            let proxy = sharedData.entries[SharedDataKeys.proxySettings]?.get(ProxySettings.self)?.effectiveActiveServer
++            ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: models, proxy: proxy, completion: { answer, error in
++                DispatchQueue.main.async {
++                    if let answer = answer {
++                        resultController?.show(text: answer, isError: false)
++                    } else {
++                        resultController?.show(text: error ?? "Неизвестная ошибка.", isError: true)
++                    }
 +                }
-+            }
++            })
 +        })
-+    })
++    }
++    resultController.retry = run
++    run()
 +}
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift
 new file mode 100644
