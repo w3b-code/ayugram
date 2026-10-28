@@ -685,12 +685,239 @@ index 00000000..078feb4b
 +        }
 +    })
 +}
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift
+new file mode 100644
+index 00000000..5175d7cb
+--- /dev/null
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift
+@@ -0,0 +1,221 @@
++import Foundation
++import UIKit
++import Display
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import TelegramStringFormatting
++import ItemListUI
++import AccountContext
++
++/// How far back the deleted messages screen looks.
++private enum AyuDeletedMessagesPeriod: Int32, CaseIterable {
++    case day
++    case week
++    case month
++    case all
++
++    var title: String {
++        switch self {
++        case .day:
++            return "24 часа"
++        case .week:
++            return "7 дней"
++        case .month:
++            return "30 дней"
++        case .all:
++            return "Всё время"
++        }
++    }
++
++    /// The earliest deletion time shown, relative to `now`.
++    func since(now: Int32) -> Int32 {
++        switch self {
++        case .day:
++            return now - 24 * 60 * 60
++        case .week:
++            return now - 7 * 24 * 60 * 60
++        case .month:
++            return now - 30 * 24 * 60 * 60
++        case .all:
++            return 0
++        }
++    }
++}
++
++private final class AyuDeletedMessagesArguments {
++    let selectPeriod: (AyuDeletedMessagesPeriod) -> Void
++    let openMessage: (AyuDeletedMessage) -> Void
++
++    init(selectPeriod: @escaping (AyuDeletedMessagesPeriod) -> Void, openMessage: @escaping (AyuDeletedMessage) -> Void) {
++        self.selectPeriod = selectPeriod
++        self.openMessage = openMessage
++    }
++}
++
++private enum AyuDeletedMessagesSection: Int32 {
++    case period
++    case messages
++}
++
++private enum AyuDeletedMessagesEntry: ItemListNodeEntry {
++    case periodHeader
++    case period(AyuDeletedMessagesPeriod, checked: Bool)
++    case messagesHeader(String)
++    case message(index: Int32, label: String, text: String, AyuDeletedMessageBox)
++    case info(String)
++
++    var section: ItemListSectionId {
++        switch self {
++        case .periodHeader, .period:
++            return AyuDeletedMessagesSection.period.rawValue
++        case .messagesHeader, .message, .info:
++            return AyuDeletedMessagesSection.messages.rawValue
++        }
++    }
++
++    var stableId: Int32 {
++        switch self {
++        case .periodHeader:
++            return 0
++        case let .period(period, _):
++            return 1 + period.rawValue
++        case .messagesHeader:
++            return 10
++        case .info:
++            return 11
++        case let .message(index, _, _, _):
++            return 100 + index
++        }
++    }
++
++    static func <(lhs: AyuDeletedMessagesEntry, rhs: AyuDeletedMessagesEntry) -> Bool {
++        return lhs.stableId < rhs.stableId
++    }
++
++    func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
++        let arguments = arguments as! AyuDeletedMessagesArguments
++        switch self {
++        case .periodHeader:
++            return ItemListSectionHeaderItem(presentationData: presentationData, text: "ПЕРИОД", sectionId: self.section)
++        case let .period(period, checked):
++            return ItemListCheckboxItem(presentationData: presentationData, systemStyle: .glass, title: period.title, style: .left, checked: checked, zeroSeparatorInsets: false, sectionId: self.section, action: {
++                arguments.selectPeriod(period)
++            })
++        case let .messagesHeader(text):
++            return ItemListSectionHeaderItem(presentationData: presentationData, text: text, sectionId: self.section)
++        case let .message(_, label, text, box):
++            return ItemListTextWithLabelItem(presentationData: presentationData, label: label, text: text, style: .blocks, enabledEntityTypes: [], multiline: true, sectionId: self.section, action: {
++                arguments.openMessage(box.message)
++            })
++        case let .info(text):
++            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        }
++    }
++}
++
++/// Wraps a deleted message so the entries can compare it by identity.
++private final class AyuDeletedMessageBox: Equatable {
++    let message: AyuDeletedMessage
++
++    init(message: AyuDeletedMessage) {
++        self.message = message
++    }
++
++    static func ==(lhs: AyuDeletedMessageBox, rhs: AyuDeletedMessageBox) -> Bool {
++        return lhs.message.messageId == rhs.message.messageId && lhs.message.deletedAt == rhs.message.deletedAt
++    }
++}
++
++/// The most rows the screen shows at once.
++private let ayuDeletedMessagesRowLimit = 300
++
++private func ayuDeletedMessagesEntries(period: AyuDeletedMessagesPeriod, messages: [AyuDeletedMessage]?, presentationData: PresentationData) -> [AyuDeletedMessagesEntry] {
++    var entries: [AyuDeletedMessagesEntry] = []
++    entries.append(.periodHeader)
++    for item in AyuDeletedMessagesPeriod.allCases {
++        entries.append(.period(item, checked: item == period))
++    }
++
++    guard let messages = messages else {
++        entries.append(.messagesHeader("СООБЩЕНИЯ"))
++        entries.append(.info("Загрузка…"))
++        return entries
++    }
++    entries.append(.messagesHeader("СООБЩЕНИЯ: \(messages.count)"))
++    if messages.isEmpty {
++        entries.append(.info("За этот период удалённых сообщений нет. В список попадают сообщения, удалённые после установки этой версии."))
++        return entries
++    }
++
++    func formatDate(_ timestamp: Int32) -> String {
++        return stringForMediumDate(timestamp: timestamp, strings: presentationData.strings, dateTimeFormat: presentationData.dateTimeFormat)
++    }
++    for (index, message) in messages.prefix(ayuDeletedMessagesRowLimit).enumerated() {
++        let chatTitle = message.peer?.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder) ?? "Чат"
++        var label = chatTitle
++        if let author = message.author, author.id != message.peer?.id {
++            label += " · " + author.displayTitle(strings: presentationData.strings, displayOrder: presentationData.nameDisplayOrder)
++        }
++        var text = ""
++        if let mediaDescription = message.mediaDescription {
++            text = mediaDescription
++        }
++        if !message.text.isEmpty {
++            text += text.isEmpty ? message.text : "\n" + message.text
++        }
++        if text.isEmpty {
++            text = "Сообщение"
++        }
++        if text.count > 300 {
++            text = String(text.prefix(300)) + "…"
++        }
++        text += "\n\nОтправлено: \(formatDate(message.date))\nУдалено: \(formatDate(message.deletedAt))"
++        entries.append(.message(index: Int32(index), label: label, text: text, AyuDeletedMessageBox(message: message)))
++    }
++    if messages.count > ayuDeletedMessagesRowLimit {
++        entries.append(.info("Показаны последние \(ayuDeletedMessagesRowLimit). Выберите период короче, чтобы увидеть остальные."))
++    }
++    return entries
++}
++
++/// Saved deleted messages from every chat, newest deletion first. A row opens the message in its
++/// chat, where its photos and files open as usual.
++public func ayuDeletedMessagesController(context: AccountContext) -> ViewController {
++    let periodPromise = ValuePromise<AyuDeletedMessagesPeriod>(.week, ignoreRepeated: true)
++    var openMessageImpl: ((AyuDeletedMessage) -> Void)?
++
++    let arguments = AyuDeletedMessagesArguments(selectPeriod: { period in
++        periodPromise.set(period)
++    }, openMessage: { message in
++        openMessageImpl?(message)
++    })
++
++    let messages: Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError> = periodPromise.get()
++    |> mapToSignal { period -> Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError> in
++        let now = Int32(Date().timeIntervalSince1970)
++        let loaded: Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError> = ayuDeletedMessages(account: context.account, since: period.since(now: now))
++        |> map { messages -> (AyuDeletedMessagesPeriod, [AyuDeletedMessage]?) in
++            return (period, messages)
++        }
++        return Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError>.single((period, nil))
++        |> then(loaded)
++    }
++
++    let signal = combineLatest(queue: .mainQueue(), context.sharedContext.presentationData, messages)
++    |> map { presentationData, periodAndMessages -> (ItemListControllerState, (ItemListNodeState, Any)) in
++        let (period, messages) = periodAndMessages
++        let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text("Удалённые сообщения"), leftNavigationButton: nil, rightNavigationButton: nil, backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back))
++        let listState = ItemListNodeState(presentationData: ItemListPresentationData(presentationData), entries: ayuDeletedMessagesEntries(period: period, messages: messages, presentationData: presentationData), style: .blocks, animateChanges: false)
++        return (controllerState, (listState, arguments))
++    }
++
++    let controller = ItemListController(context: context, state: signal)
++    openMessageImpl = { [weak controller] message in
++        guard let peer = message.peer, let navigationController = controller?.navigationController as? NavigationController else {
++            return
++        }
++        context.sharedContext.navigateToChatController(NavigateToChatControllerParams(navigationController: navigationController, context: context, chatLocation: .peer(peer), subject: .message(id: .id(message.messageId), highlight: ChatControllerSubject.MessageHighlight(quote: nil), timecode: nil, setupReply: false), keepStack: .always))
++    }
++    return controller
++}
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..6f75b75c
+index 00000000..92d3b41d
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,267 @@
 +import Foundation
 +import UIKit
 +import Display
@@ -704,9 +931,11 @@ index 00000000..6f75b75c
 +
 +private final class AyuGramSettingsControllerArguments {
 +    let update: ((inout AyuSettingsValues) -> Void) -> Void
++    let openDeletedMessages: () -> Void
 +
-+    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void) {
++    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void, openDeletedMessages: @escaping () -> Void) {
 +        self.update = update
++        self.openDeletedMessages = openDeletedMessages
 +    }
 +}
 +
@@ -809,17 +1038,18 @@ index 00000000..6f75b75c
 +    case choice(id: Int32, section: AyuGramSettingsSection, choice: AyuGramChoice, title: String, checked: Bool)
 +    case footer(id: Int32, section: AyuGramSettingsSection, text: String)
 +    case apiKey(id: Int32, section: AyuGramSettingsSection, text: String)
++    case deletedMessages(id: Int32, section: AyuGramSettingsSection)
 +
 +    var section: ItemListSectionId {
 +        switch self {
-+        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _):
++        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _), let .deletedMessages(_, section):
 +            return section.rawValue
 +        }
 +    }
 +
 +    var stableId: Int32 {
 +        switch self {
-+        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _):
++        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _), let .deletedMessages(id, _):
 +            return id
 +        }
 +    }
@@ -843,6 +1073,10 @@ index 00000000..6f75b75c
 +            })
 +        case let .footer(_, _, text):
 +            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        case .deletedMessages:
++            return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: "Удалённые сообщения", label: "", sectionId: self.section, style: .blocks, action: {
++                arguments.openDeletedMessages()
++            })
 +        case let .apiKey(_, _, text):
 +            return ItemListSingleLineInputItem(presentationData: presentationData, systemStyle: .glass, title: NSAttributedString(), text: text, placeholder: "API-ключ Google AI Studio", type: .password, clearType: .always, sectionId: self.section, textUpdated: { value in
 +                arguments.update { $0.aiApiKey = value }
@@ -896,11 +1130,12 @@ index 00000000..6f75b75c
 +    choice(.sendWithoutSound, .sendWithoutSound(.inGhostMode), "В режиме призрака", values.sendWithoutSound == .inGhostMode)
 +
 +    header(.saving, "СОХРАНЕНИЕ СООБЩЕНИЙ")
++    add { .deletedMessages(id: $0, section: .saving) }
 +    toggle(.saving, .saveDeleted, "Сохранять удалённые", values.saveDeletedMessages)
 +    toggle(.saving, .saveHistory, "Сохранять историю правок", values.saveMessagesHistory)
 +    toggle(.saving, .semiTransparent, "Полупрозрачные удалённые", values.semiTransparentDeletedMessages)
 +    toggle(.saving, .keepAlive, "Держать в фоне", values.keepAliveInBackground)
-+    footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑. История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить. «Держать в фоне» не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи). Закрытое смахиванием приложение не работает.")
++    footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑, а все сразу видны в «Удалённых сообщениях». История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить. «Держать в фоне» не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи). Закрытое смахиванием приложение не работает.")
 +
 +    header(.interface, "ИНТЕРФЕЙС")
 +    toggle(.interface, .disableAds, "Блокировать рекламу", values.disableAds)
@@ -927,8 +1162,11 @@ index 00000000..6f75b75c
 +}
 +
 +public func ayuGramSettingsController(context: AccountContext) -> ViewController {
++    var pushControllerImpl: ((ViewController) -> Void)?
 +    let arguments = AyuGramSettingsControllerArguments(update: { f in
 +        AyuSettings.shared.update(f)
++    }, openDeletedMessages: {
++        pushControllerImpl?(ayuDeletedMessagesController(context: context))
 +    })
 +
 +    let signal = combineLatest(queue: .mainQueue(),
@@ -941,7 +1179,11 @@ index 00000000..6f75b75c
 +        return (controllerState, (listState, arguments))
 +    }
 +
-+    return ItemListController(context: context, state: signal)
++    let controller = ItemListController(context: context, state: signal)
++    pushControllerImpl = { [weak controller] c in
++        (controller?.navigationController as? NavigationController)?.pushViewController(c)
++    }
++    return controller
 +}
 diff --git a/submodules/TelegramCore/BUILD b/submodules/TelegramCore/BUILD
 index d4ed7767..144950c6 100644
@@ -982,10 +1224,10 @@ index bf906980..ee03f18a 100644
      declareEncodable(TelegramMediaStory.self, f: { TelegramMediaStory(decoder: $0) })
 diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
 new file mode 100644
-index 00000000..bf2267c6
+index 00000000..80b1a426
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,379 @@
 +import Foundation
 +import AyuGramSettings
 +import Postbox
@@ -1079,6 +1321,10 @@ index 00000000..bf2267c6
 +func ayuMarkMessagesDeleted(transaction: Transaction, ids: [MessageId]) -> [MessageId] {
 +    let timestamp = Int32(Date().timeIntervalSince1970)
 +    var remaining: [MessageId] = []
++    var marked: [MessageId] = []
++    defer {
++        ayuAddToDeletedMessagesIndex(transaction: transaction, ids: marked, deletedAt: timestamp)
++    }
 +    for id in ids {
 +        guard id.namespace == Namespaces.Message.Cloud, let message = transaction.getMessage(id) else {
 +            remaining.append(id)
@@ -1095,8 +1341,110 @@ index 00000000..bf2267c6
 +            }
 +            return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: current.tags, globalTags: current.globalTags, localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: attributes, media: current.media))
 +        })
++        marked.append(id)
 +    }
 +    return remaining
++}
++
++/// The messages marked deleted, oldest first, so the deleted messages screen can list them without
++/// scanning every chat. Kept in the account's database, which the notification extension shares.
++private struct AyuDeletedMessagesIndex: Codable {
++    struct Item: Codable {
++        var peerId: Int64
++        var namespace: Int32
++        var id: Int32
++        var deletedAt: Int32
++    }
++
++    var items: [Item]
++}
++
++private let ayuDeletedMessagesIndexKey: ValueBoxKey = {
++    let key = ValueBoxKey(length: 4)
++    key.setInt32(0, value: 7301)
++    return key
++}()
++
++/// The index keeps the newest entries up to this many.
++private let ayuDeletedMessagesIndexLimit = 5000
++
++private func ayuAddToDeletedMessagesIndex(transaction: Transaction, ids: [MessageId], deletedAt: Int32) {
++    if ids.isEmpty {
++        return
++    }
++    transaction.updatePreferencesEntry(key: ayuDeletedMessagesIndexKey, { entry in
++        var index = entry?.get(AyuDeletedMessagesIndex.self) ?? AyuDeletedMessagesIndex(items: [])
++        for id in ids {
++            index.items.append(AyuDeletedMessagesIndex.Item(peerId: id.peerId.toInt64(), namespace: id.namespace, id: id.id, deletedAt: deletedAt))
++        }
++        if index.items.count > ayuDeletedMessagesIndexLimit {
++            index.items.removeFirst(index.items.count - ayuDeletedMessagesIndexLimit)
++        }
++        return PreferencesEntry(index)
++    })
++}
++
++/// A saved deleted message, as the deleted messages screen shows it.
++public struct AyuDeletedMessage {
++    public let messageId: EngineMessage.Id
++    /// The chat the message was in.
++    public let peer: EnginePeer?
++    public let author: EnginePeer?
++    public let text: String
++    /// "Photo", "File" and the like for a message with media, else nil.
++    public let mediaDescription: String?
++    public let date: Int32
++    public let deletedAt: Int32
++}
++
++private func ayuMediaDescription(_ media: [Media]) -> String? {
++    for item in media {
++        if item is TelegramMediaImage {
++            return "📷 Фото"
++        }
++        if let file = item as? TelegramMediaFile {
++            if file.isVoice {
++                return "🎤 Голосовое сообщение"
++            } else if file.isInstantVideo {
++                return "⏺ Видеосообщение"
++            } else if file.isSticker {
++                return "Стикер"
++            } else if file.isVideo {
++                return "🎬 Видео"
++            } else if file.isMusic {
++                return "🎵 Аудио"
++            } else {
++                return "📎 Файл"
++            }
++        }
++    }
++    return nil
++}
++
++/// The saved deleted messages deleted at or after `since`, newest deletion first.
++public func ayuDeletedMessages(account: Account, since: Int32) -> Signal<[AyuDeletedMessage], NoError> {
++    return account.postbox.transaction { transaction -> [AyuDeletedMessage] in
++        let index = transaction.getPreferencesEntry(key: ayuDeletedMessagesIndexKey)?.get(AyuDeletedMessagesIndex.self) ?? AyuDeletedMessagesIndex(items: [])
++        var result: [AyuDeletedMessage] = []
++        var seen = Set<MessageId>()
++        for item in index.items.reversed() where item.deletedAt >= since {
++            let id = MessageId(peerId: PeerId(item.peerId), namespace: item.namespace, id: item.id)
++            guard !seen.contains(id), let message = transaction.getMessage(id), message.ayuDeletedAttribute != nil else {
++                continue
++            }
++            seen.insert(id)
++            result.append(AyuDeletedMessage(
++                messageId: id,
++                peer: transaction.getPeer(id.peerId).flatMap { EnginePeer($0) },
++                author: message.author.flatMap { EnginePeer($0) },
++                text: message.text,
++                mediaDescription: ayuMediaDescription(message.media),
++                date: message.timestamp,
++                deletedAt: item.deletedAt
++            ))
++        }
++        return result
++    }
 +}
 +
 +/// Deletes messages for a MESSAGE_DELETED push in the notification extension, which shares the
