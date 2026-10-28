@@ -492,10 +492,10 @@ index 2b819a9c..0560b7dd 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
 new file mode 100644
-index 00000000..e7cb9a35
+index 00000000..1f6c097d
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,575 @@
 +import Foundation
 +import UIKit
 +import Network
@@ -519,11 +519,41 @@ index 00000000..e7cb9a35
 +    }
 +
 +    fileprivate var instruction: String {
++        let common = """
++        Ты помощник внутри мессенджера. Тебе присылают одно сообщение из чата.
++        Пометки [имя], @user, [ссылка], [номер], [email] заменяют личные данные: не пытайся их угадать.
++        Отвечай на языке сообщения; если язык не ясен, отвечай по-русски.
++        Оформление: ответ читают на телефоне, формулы не отрисовываются.
++        - Числа, формулы и единицы пиши цифрами и символами Unicode: x², x⁴, √2, ±, ×, ÷, ≤, ≥, ≠, ≈, π, ∞, °, дроби через /.
++        - Никогда не используй LaTeX, знак $ и обратный слэш.
++        - Можно выделять главное **жирным** и делать списки с «•». Без заголовков и таблиц.
++        """
 +        switch self {
 +        case .summarize:
-+            return "Кратко перескажи текст сообщения: главное, в 2–5 предложениях. Отвечай на русском языке, простым текстом без разметки."
++            return common + """
++
++            Задача: кратко перескажи сообщение. Передай главную мысль и важные детали (числа, даты, договорённости, просьбы) в 1–5 предложениях, без вступлений вроде «В сообщении говорится».
++            """
 +        case .answer:
-+            return "Ответь на вопрос из сообщения по существу и кратко. Если вопроса нет, ответь на главное, о чём в нём говорится. Отвечай на русском языке, простым текстом без разметки."
++            return common + """
++
++            Задача: ответь на сообщение так, как ответил бы знающий человек.
++            - Если это задача (математика, физика, химия, программирование, тест, логика), реши её: коротко покажи ход решения по шагам и в конце отдельной строкой напиши **Ответ: …**. Проверь вычисления перед ответом.
++            - Если это вопрос, ответь по существу, точно и без воды.
++            - Если просят перевести, переведи; если это код, объясни или исправь его.
++            - Если в сообщении нет вопроса, кратко ответь на главное в нём.
++            Не выдумывай факты; если данных не хватает, скажи, чего именно не хватает.
++            """
++        }
++    }
++
++    /// How much the 2.5 models may think first: none for a summary, some for solving a task.
++    fileprivate var thinkingBudget: Int {
++        switch self {
++        case .summarize:
++            return 0
++        case .answer:
++            return 2048
 +        }
 +    }
 +}
@@ -573,13 +603,20 @@ index 00000000..e7cb9a35
 +    return ayuAIModels.first(where: { $0.id == id })?.title.components(separatedBy: " — ").first ?? id
 +}
 +
-+/// The models to try, in order: the chosen one first, then the others as fallbacks.
-+private func ayuAIModelOrder(_ selected: String) -> [String] {
++/// The models to try, in order: the chosen one first, then the others as fallbacks. Auto takes the
++/// fastest for a summary and a thinking 2.5 Flash for a task, where accuracy matters more.
++private func ayuAIModelOrder(_ selected: String, action: AyuAIAction) -> [String] {
 +    let all = ayuAIModels.map(\.id)
-+    guard all.contains(selected) else {
-+        return all
++    var first = selected
++    if !all.contains(first) {
++        switch action {
++        case .summarize:
++            first = "gemini-flash-lite-latest"
++        case .answer:
++            first = "gemini-2.5-flash"
++        }
 +    }
-+    return [selected] + all.filter { $0 != selected }
++    return [first] + all.filter { $0 != first }
 +}
 +
 +private struct AyuGeminiResult {
@@ -594,15 +631,16 @@ index 00000000..e7cb9a35
 +///
 +/// With a SOCKS5 proxy on in Telegram, the request goes through it too. An MTProto proxy only
 +/// carries Telegram's own protocol, so with one the request goes direct.
-+private func ayuGeminiCall(model: String, instruction: String, text: String, maxOutputTokens: Int, apiKey: String, proxy: ProxyServerSettings?, timeout: TimeInterval, completion: @escaping (AyuGeminiResult) -> Void) {
++private func ayuGeminiCall(model: String, instruction: String, text: String, maxOutputTokens: Int, thinkingBudget: Int, apiKey: String, proxy: ProxyServerSettings?, timeout: TimeInterval, completion: @escaping (AyuGeminiResult) -> Void) {
 +    guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent") else {
 +        completion(AyuGeminiResult(status: 0, json: nil, error: nil, elapsed: 0.0))
 +        return
 +    }
-+    var generationConfig: [String: Any] = ["temperature": 0.3, "maxOutputTokens": maxOutputTokens]
-+    // 2.5 models think before answering unless told not to, which is most of their delay.
++    // The thinking budget counts against the output limit, so the answer keeps its full room.
++    var generationConfig: [String: Any] = ["temperature": 0.2, "maxOutputTokens": maxOutputTokens + thinkingBudget]
++    // 2.5 models think as long as they like unless given a budget, which is most of their delay.
 +    if model.hasPrefix("gemini-2.5-") {
-+        generationConfig["thinkingConfig"] = ["thinkingBudget": 0]
++        generationConfig["thinkingConfig"] = ["thinkingBudget": thinkingBudget]
 +    }
 +    let body: [String: Any] = [
 +        "systemInstruction": ["parts": [["text": instruction]]],
@@ -653,7 +691,7 @@ index 00000000..e7cb9a35
 +        return
 +    }
 +    attempt(model)
-+    ayuGeminiCall(model: model, instruction: action.instruction, text: text, maxOutputTokens: 1024, apiKey: apiKey, proxy: proxy, timeout: 30.0, completion: { result in
++    ayuGeminiCall(model: model, instruction: action.instruction, text: text, maxOutputTokens: 2048, thinkingBudget: action.thinkingBudget, apiKey: apiKey, proxy: proxy, timeout: 45.0, completion: { result in
 +        let status = result.status
 +        // The next model has its own capacity and limits.
 +        if [404, 429, 500, 503].contains(status) && models.count > 1 {
@@ -687,6 +725,101 @@ index 00000000..e7cb9a35
 +            completion(nil, "Нейросеть не дала ответа (код \(status)).")
 +        }
 +    })
++}
++
++/// LaTeX the model writes despite being asked not to, as plain Unicode.
++private let ayuLatexReplacements: [(String, String)] = [
++    ("\\\\sqrt\\{([^{}]+)\\}", "√($1)"),
++    ("\\\\frac\\{([^{}]+)\\}\\{([^{}]+)\\}", "($1)/($2)"),
++    ("\\\\text\\{([^{}]*)\\}", "$1"),
++    ("\\\\mathrm\\{([^{}]*)\\}", "$1"),
++    ("\\\\mathbb\\{R\\}", "ℝ"),
++    ("\\\\(geq|ge)\\b", "≥"),
++    ("\\\\(leq|le)\\b", "≤"),
++    ("\\\\(neq|ne)\\b", "≠"),
++    ("\\\\pm\\b", "±"),
++    ("\\\\mp\\b", "∓"),
++    ("\\\\(cdot|times)\\b", "×"),
++    ("\\\\div\\b", "÷"),
++    ("\\\\approx\\b", "≈"),
++    ("\\\\pi\\b", "π"),
++    ("\\\\infty\\b", "∞"),
++    ("\\\\(Rightarrow|implies)\\b", "⇒"),
++    ("\\\\(to|rightarrow)\\b", "→"),
++    ("\\\\in\\b", "∈"),
++    ("\\\\(left|right)\\b", ""),
++    ("\\\\[,;! ]", " "),
++    ("\\\\([A-Za-z]+)", "$1")
++]
++
++private let ayuSuperscripts: [Character: Character] = ["0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻", "+": "⁺", "n": "ⁿ"]
++
++private func ayuRegexReplace(_ text: String, _ pattern: String, _ template: String, options: NSRegularExpression.Options = []) -> String {
++    guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else {
++        return text
++    }
++    return regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
++}
++
++/// "x^2", "x^{-1}" → "x²", "x⁻¹". A bare power takes digits only, so "x^2+1" keeps its plus.
++private func ayuSuperscriptPowers(_ text: String) -> String {
++    var result = text
++    for pattern in ["\\^\\{([0-9+\\-n]{1,4})\\}", "\\^([0-9]{1,3}|n)"] {
++        guard let regex = try? NSRegularExpression(pattern: pattern) else {
++            continue
++        }
++        let source = result
++        for match in regex.matches(in: source, range: NSRange(source.startIndex..., in: source)).reversed() {
++            guard let whole = Range(match.range, in: result), let exponentRange = Range(match.range(at: 1), in: result) else {
++                continue
++            }
++            let exponent = String(result[exponentRange])
++            let converted = exponent.compactMap { ayuSuperscripts[$0] }
++            if converted.count == exponent.count {
++                result.replaceSubrange(whole, with: String(converted))
++            }
++        }
++    }
++    return result
++}
++
++/// The model's reply as the sheet shows it: LaTeX turned into Unicode, powers raised, and the
++/// Markdown it may use (bold, italics, code, bullets) applied instead of printed.
++private func ayuAIFormat(_ text: String, font: UIFont) -> NSAttributedString {
++    var plain = text
++    // Formulas between $…$ or $$…$$: unwrap and clean them.
++    plain = ayuRegexReplace(plain, "\\$\\$?([^$]+?)\\$\\$?", "$1")
++    for (pattern, template) in ayuLatexReplacements {
++        plain = ayuRegexReplace(plain, pattern, template)
++    }
++    plain = ayuSuperscriptPowers(plain)
++    // Headings and Markdown list markers.
++    plain = ayuRegexReplace(plain, "(?m)^#{1,6}\\s*", "")
++    plain = ayuRegexReplace(plain, "(?m)^(\\s*)[*\\-]\\s+", "$1• ")
++
++    let boldFont = UIFont.systemFont(ofSize: font.pointSize, weight: .semibold)
++    let italicFont = UIFont.italicSystemFont(ofSize: font.pointSize)
++    let codeFont = UIFont.monospacedSystemFont(ofSize: font.pointSize * 0.92, weight: .regular)
++    let result = NSMutableAttributedString()
++    if let parsed = try? AttributedString(markdown: plain, options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
++        for run in parsed.runs {
++            let runText = String(parsed[run.range].characters)
++            var runFont = font
++            if let intent = run.inlinePresentationIntent {
++                if intent.contains(.code) {
++                    runFont = codeFont
++                } else if intent.contains(.stronglyEmphasized) {
++                    runFont = boldFont
++                } else if intent.contains(.emphasized) {
++                    runFont = italicFont
++                }
++            }
++            result.append(NSAttributedString(string: runText, attributes: [.font: runFont, .foregroundColor: UIColor.label]))
++        }
++    } else {
++        result.append(NSAttributedString(string: plain, attributes: [.font: font, .foregroundColor: UIColor.label]))
++    }
++    return result
 +}
 +
 +private final class AyuAIResultController: UIViewController {
@@ -791,8 +924,12 @@ index 00000000..e7cb9a35
 +        self.activityIndicator.stopAnimating()
 +        self.activityIndicator.isHidden = true
 +        self.statusLabel.isHidden = true
-+        self.textView.text = text
-+        self.textView.textColor = isError ? .systemRed : .label
++        let font = UIFont.preferredFont(forTextStyle: .body)
++        if isError {
++            self.textView.attributedText = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.systemRed])
++        } else {
++            self.textView.attributedText = ayuAIFormat(text, font: font)
++        }
 +        self.showsRetry = isError && self.retry != nil
 +        self.navigationItem.rightBarButtonItem?.title = self.showsRetry ? "Повторить" : "Копировать"
 +        self.navigationItem.rightBarButtonItem?.isEnabled = !isError || self.showsRetry
@@ -852,7 +989,7 @@ index 00000000..e7cb9a35
 +    let anonymized = ayuAIAnonymize(text, names: names)
 +    let run: () -> Void = { [weak resultController] in
 +        resultController?.showLoading()
-+        let models = ayuAIModelOrder(AyuSettings.shared.values.aiModel)
++        let models = ayuAIModelOrder(AyuSettings.shared.values.aiModel, action: action)
 +        ayuAIWithProxy(context: context, { proxy in
 +            ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: models, proxy: proxy, attempt: { model in
 +                DispatchQueue.main.async {
@@ -898,7 +1035,7 @@ index 00000000..e7cb9a35
 +        ayuAIWithProxy(context: context, { proxy in
 +            let lines = AyuSpeedTestLines(count: ayuAIModels.count)
 +            for (index, model) in ayuAIModels.enumerated() {
-+                ayuGeminiCall(model: model.id, instruction: "Ответь одним словом.", text: "Скажи: да", maxOutputTokens: 16, apiKey: apiKey, proxy: proxy, timeout: 20.0, completion: { result in
++                ayuGeminiCall(model: model.id, instruction: "Ответь одним словом.", text: "Скажи: да", maxOutputTokens: 16, thinkingBudget: 0, apiKey: apiKey, proxy: proxy, timeout: 20.0, completion: { result in
 +                    let verdict: String
 +                    if ayuGeminiAnswer(result.json) != nil {
 +                        let seconds = String(format: "%.1f", result.elapsed)
@@ -1163,7 +1300,7 @@ index 00000000..5175d7cb
 +}
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..49bb2332
+index 00000000..7c3f0c8e
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 @@ -0,0 +1,295 @@
@@ -1415,12 +1552,12 @@ index 00000000..49bb2332
 +    if values.aiEnabled {
 +        header(.aiModel, "МОДЕЛЬ НЕЙРОСЕТИ")
 +        let knownModel = ayuAIModels.contains(where: { $0.id == values.aiModel })
-+        choice(.aiModel, .aiModel(ayuAIAutoModel), "Авто — сначала самая быстрая", !knownModel)
++        choice(.aiModel, .aiModel(ayuAIAutoModel), "Авто — быстрая для пересказа, точная для задач", !knownModel)
 +        for model in ayuAIModels {
 +            choice(.aiModel, .aiModel(model.id), model.title, values.aiModel == model.id)
 +        }
 +        add { .testAIModels(id: $0, section: .aiModel) }
-+        footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее. «Проверить скорость» спрашивает все модели и показывает, какая сейчас свободна.")
++        footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее; для «Ответить на вопрос» 2.5 Flash сначала обдумывает задачу, это дольше, но решения вернее. «Проверить скорость» спрашивает все модели и показывает, какая сейчас свободна.")
 +    }
 +
 +    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
