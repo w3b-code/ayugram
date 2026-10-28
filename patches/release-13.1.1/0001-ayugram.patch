@@ -485,12 +485,16 @@ index 2b819a9c..0560b7dd 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
 new file mode 100644
-index 00000000..078feb4b
+index 00000000..e8fdd599
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,219 @@
 +import Foundation
 +import UIKit
++import Network
++import SwiftSignalKit
++import TelegramCore
++import AccountContext
 +import AyuGramSettings
 +
 +/// What the neural network does with a message.
@@ -545,7 +549,10 @@ index 00000000..078feb4b
 +/// Sends only the anonymized message text and the instruction to the Gemini API. No account,
 +/// chat or device data goes with it: an ephemeral session without cookies or cache, and the key in
 +/// a header rather than the URL.
-+private func ayuAIRequest(action: AyuAIAction, text: String, apiKey: String, models: [String], completion: @escaping (String?, String?) -> Void) {
++///
++/// With a SOCKS5 proxy on in Telegram, the request goes through it too. An MTProto proxy only
++/// carries Telegram's own protocol, so with one the request goes direct.
++private func ayuAIRequest(action: AyuAIAction, text: String, apiKey: String, models: [String], proxy: ProxyServerSettings?, completion: @escaping (String?, String?) -> Void) {
 +    guard let model = models.first, let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent") else {
 +        completion(nil, "Модель недоступна.")
 +        return
@@ -566,13 +573,20 @@ index 00000000..078feb4b
 +    let configuration = URLSessionConfiguration.ephemeral
 +    configuration.httpCookieStorage = nil
 +    configuration.urlCache = nil
++    if let proxy = proxy, case let .socks5(username, password) = proxy.connection, #available(iOS 17.0, *), let port = NWEndpoint.Port(rawValue: UInt16(clamping: proxy.port)) {
++        var proxyConfiguration = ProxyConfiguration(socksv5Proxy: .hostPort(host: NWEndpoint.Host(proxy.host), port: port))
++        if let username = username, let password = password, !username.isEmpty {
++            proxyConfiguration.applyCredential(username: username, password: password)
++        }
++        configuration.proxyConfigurations = [proxyConfiguration]
++    }
 +    let session = URLSession(configuration: configuration)
 +    session.dataTask(with: request, completionHandler: { data, response, error in
 +        session.finishTasksAndInvalidate()
 +        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
 +        let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
 +        if status == 404 && models.count > 1 {
-+            ayuAIRequest(action: action, text: text, apiKey: apiKey, models: Array(models.dropFirst()), completion: completion)
++            ayuAIRequest(action: action, text: text, apiKey: apiKey, models: Array(models.dropFirst()), proxy: proxy, completion: completion)
 +            return
 +        }
 +        if let error = error {
@@ -587,6 +601,10 @@ index 00000000..078feb4b
 +            }
 +        }
 +        if let errorObject = json?["error"] as? [String: Any], let message = errorObject["message"] as? String {
++            if message.localizedCaseInsensitiveContains("location") {
++                completion(nil, "Google не работает в вашей стране. Включите VPN или SOCKS5-прокси в настройках Telegram (MTProto-прокси не подходит).\n\n\(message)")
++                return
++            }
 +            completion(nil, "Ошибка Google (\(status)): \(message)")
 +        } else {
 +            completion(nil, "Нейросеть не дала ответа (код \(status)).")
@@ -654,7 +672,7 @@ index 00000000..078feb4b
 +
 +/// Opens a sheet over `window` and fills it with the network's answer about `text`. `names` are the
 +/// names to strip from the text first.
-+public func ayuAIPresent(action: AyuAIAction, text: String, names: [String], window: UIWindow?) {
++public func ayuAIPresent(context: AccountContext, action: AyuAIAction, text: String, names: [String], window: UIWindow?) {
 +    guard var presenter = window?.rootViewController else {
 +        return
 +    }
@@ -675,14 +693,19 @@ index 00000000..078feb4b
 +        return
 +    }
 +    let anonymized = ayuAIAnonymize(text, names: names)
-+    ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: ["gemini-flash-latest", "gemini-2.5-flash"], completion: { [weak resultController] answer, error in
-+        DispatchQueue.main.async {
-+            if let answer = answer {
-+                resultController?.show(text: answer, isError: false)
-+            } else {
-+                resultController?.show(text: error ?? "Неизвестная ошибка.", isError: true)
++    let _ = (context.sharedContext.accountManager.sharedData(keys: [SharedDataKeys.proxySettings])
++    |> take(1)
++    |> deliverOnMainQueue).start(next: { [weak resultController] sharedData in
++        let proxy = sharedData.entries[SharedDataKeys.proxySettings]?.get(ProxySettings.self)?.effectiveActiveServer
++        ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: ["gemini-flash-latest", "gemini-2.5-flash"], proxy: proxy, completion: { [weak resultController] answer, error in
++            DispatchQueue.main.async {
++                if let answer = answer {
++                    resultController?.show(text: answer, isError: false)
++                } else {
++                    resultController?.show(text: error ?? "Неизвестная ошибка.", isError: true)
++                }
 +            }
-+        }
++        })
 +    })
 +}
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift
@@ -914,7 +937,7 @@ index 00000000..5175d7cb
 +}
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..92d3b41d
+index 00000000..374a2b02
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 @@ -0,0 +1,267 @@
@@ -1143,14 +1166,14 @@ index 00000000..92d3b41d
 +    toggle(.interface, .disableNumberRounding, "Отключить округление чисел", values.disableNumberRounding)
 +    toggle(.interface, .showMessageSeconds, "Время с секундами", values.showMessageSeconds)
 +    toggle(.interface, .showProfileTab, "Вкладка «Профиль»", values.showProfileTab)
-+    footer(.interface, "Реклама в каналах и в поиске не загружается. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек».")
++    footer(.interface, "Реклама в каналах, в поиске и канал спонсора прокси не загружаются. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек».")
 +
 +    header(.ai, "НЕЙРОСЕТЬ")
 +    toggle(.ai, .ai, "Нейросеть (Google Gemini)", values.aiEnabled)
 +    if values.aiEnabled {
 +        add { .apiKey(id: $0, section: .ai, text: values.aiApiKey) }
 +    }
-+    footer(.ai, "В меню сообщения появится «Нейросеть»: краткий пересказ или ответ на вопрос из сообщения. Бесплатный ключ: aistudio.google.com → Get API key.\n\nВ Google уходит только текст выбранного сообщения. Имена, @юзернеймы, ссылки t.me, номера телефонов, e-mail и длинные числа (ID) заменяются заглушками; имя чата, автор, ваш аккаунт и ID не отправляются. На бесплатном тарифе Google может использовать присланные тексты для улучшения своих моделей, поэтому не отправляйте личное.")
++    footer(.ai, "В меню сообщения появится «Нейросеть»: краткий пересказ или ответ на вопрос из сообщения. Бесплатный ключ: aistudio.google.com → Get API key. Google не работает в России: нужен VPN или SOCKS5-прокси в настройках Telegram (MTProto-прокси не подходит).\n\nВ Google уходит только текст выбранного сообщения. Имена, @юзернеймы, ссылки t.me, номера телефонов, e-mail и длинные числа (ID) заменяются заглушками; имя чата, автор, ваш аккаунт и ID не отправляются. На бесплатном тарифе Google может использовать присланные тексты для улучшения своих моделей, поэтому не отправляйте личное.")
 +
 +    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
 +    choice(.peerId, .peerIdFormat(.hidden), "Не показывать", values.peerIdFormat == .hidden)
@@ -1814,6 +1837,40 @@ index 7256668b..7a4cf429 100644
              request = self.network.request(Api.functions.account.updateStatus(offline: .boolTrue))
          }
          self.isPerformingUpdate.set(true)
+diff --git a/submodules/TelegramCore/Sources/State/ManagedProxyInfoUpdates.swift b/submodules/TelegramCore/Sources/State/ManagedProxyInfoUpdates.swift
+index 03e482f2..7bc2fcd6 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedProxyInfoUpdates.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedProxyInfoUpdates.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ internal import TelegramApi
+ import Postbox
++import AyuGramSettings
+ import SwiftSignalKit
+ import MtProtoKit
+ 
+@@ -221,6 +222,10 @@ func _internal_fetchPromoInfo(accountPeerId: EnginePeer.Id, postbox: Postbox, ne
+                 } else if ((flags & 1) << 0) != 0 {
+                     kind = .proxy
+                 }
++                // AyuGram: the proxy sponsor's channel is an ad; service announcements stay.
++                if kind == .proxy && AyuSettings.shared.values.disableAds {
++                    kind = nil
++                }
+                 
+                 var additionalChatListItems: [AdditionalChatListItem] = []
+                 if let kind, let peer, let parsedPeer = transaction.getPeer(peer.peerId) {
+@@ -249,8 +254,8 @@ func _internal_fetchPromoInfo(accountPeerId: EnginePeer.Id, postbox: Postbox, ne
+ func managedPromoInfoUpdates(accountPeerId: PeerId, postbox: Postbox, network: Network, viewTracker: AccountViewTracker) -> Signal<Void, NoError> {
+     return Signal { subscriber in
+         let queue = Queue()
+-        let update = network.contextProxyId
+-        |> distinctUntilChanged
++        // AyuGram: fetched again when ad blocking is toggled, so the proxy sponsor goes or comes back.
++        let update = combineLatest(network.contextProxyId |> distinctUntilChanged, AyuSettings.shared.signal |> map { $0.disableAds } |> distinctUntilChanged)
+         |> deliverOn(queue)
+         |> mapToSignal { _ -> Signal<Void, NoError> in
+             return (_internal_fetchPromoInfo(accountPeerId: accountPeerId, postbox: postbox, network: network)
 diff --git a/submodules/TelegramCore/Sources/State/MessageReactions.swift b/submodules/TelegramCore/Sources/State/MessageReactions.swift
 index b1a5ae4e..65fa1eb5 100644
 --- a/submodules/TelegramCore/Sources/State/MessageReactions.swift
@@ -2361,7 +2418,7 @@ index 1ceb46bc..80b84def 100644
          self.buildConfig = buildConfig
          let signatureDict = BuildConfigExtra.signatureDict()
 diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
-index 1ade8c01..cf7c320b 100644
+index 1ade8c01..312cea32 100644
 --- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 +++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 @@ -31,6 +31,7 @@ import Pasteboard
@@ -2428,7 +2485,7 @@ index 1ade8c01..cf7c320b 100644
 +                        return nil
 +                    }, action: { c, _ in
 +                        c?.dismiss(completion: {
-+                            ayuAIPresent(action: aiAction, text: aiText, names: aiNames, window: aiWindow)
++                            ayuAIPresent(context: context, action: aiAction, text: aiText, names: aiNames, window: aiWindow)
 +                        })
 +                    })))
 +                }
