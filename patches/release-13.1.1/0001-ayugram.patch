@@ -492,10 +492,10 @@ index 2b819a9c..0560b7dd 100644
          "//submodules/ItemListPeerActionItem:ItemListPeerActionItem",
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
 new file mode 100644
-index 00000000..1f6c097d
+index 00000000..b824afba
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
-@@ -0,0 +1,575 @@
+@@ -0,0 +1,656 @@
 +import Foundation
 +import UIKit
 +import Network
@@ -589,11 +589,11 @@ index 00000000..1f6c097d
 +    public let title: String
 +}
 +
++/// Google's aliases for the newest model of each kind, so they keep working as models are retired.
 +public let ayuAIModels: [AyuAIModel] = [
 +    AyuAIModel(id: "gemini-flash-lite-latest", title: "Flash-Lite — самая быстрая"),
-+    AyuAIModel(id: "gemini-2.5-flash-lite", title: "2.5 Flash-Lite — быстрая"),
 +    AyuAIModel(id: "gemini-flash-latest", title: "Flash — умнее, медленнее"),
-+    AyuAIModel(id: "gemini-2.5-flash", title: "2.5 Flash — умнее, медленнее")
++    AyuAIModel(id: "gemini-pro-latest", title: "Pro — самая умная, медленная")
 +]
 +
 +/// The value of `AyuSettingsValues.aiModel` that tries every model, fastest first.
@@ -603,9 +603,10 @@ index 00000000..1f6c097d
 +    return ayuAIModels.first(where: { $0.id == id })?.title.components(separatedBy: " — ").first ?? id
 +}
 +
-+/// The models to try, in order: the chosen one first, then the others as fallbacks. Auto takes the
-+/// fastest for a summary and a thinking 2.5 Flash for a task, where accuracy matters more.
-+private func ayuAIModelOrder(_ selected: String, action: AyuAIAction) -> [String] {
++/// The models to try, in order: the chosen one first, then the other aliases, then whatever else
++/// Google lists for the key. Auto takes the fastest for a summary and Flash for a task, where
++/// accuracy matters more.
++private func ayuAIModelOrder(_ selected: String, action: AyuAIAction, discovered: [String]) -> [String] {
 +    let all = ayuAIModels.map(\.id)
 +    var first = selected
 +    if !all.contains(first) {
@@ -613,10 +614,88 @@ index 00000000..1f6c097d
 +        case .summarize:
 +            first = "gemini-flash-lite-latest"
 +        case .answer:
-+            first = "gemini-2.5-flash"
++            first = "gemini-flash-latest"
 +        }
 +    }
-+    return [first] + all.filter { $0 != first }
++    var result = [first] + all.filter { $0 != first }
++    for model in discovered where !result.contains(model) {
++        result.append(model)
++    }
++    return result
++}
++
++/// Text models the key may use, as Google lists them; fetched once per launch, on the main queue.
++private var ayuDiscoveredModels: [String]?
++
++/// Sort key: stable before preview, Lite before Flash before Pro, newer before older.
++private func ayuModelPrecedes(_ lhs: String, _ rhs: String) -> Bool {
++    func rank(_ id: String) -> (Int, Int) {
++        let lower = id.lowercased()
++        let unstable = (lower.contains("preview") || lower.contains("exp")) ? 1 : 0
++        let family = lower.contains("lite") ? 0 : (lower.contains("flash") ? 1 : 2)
++        return (unstable, family)
++    }
++    let (lhsRank, rhsRank) = (rank(lhs), rank(rhs))
++    if lhsRank != rhsRank {
++        return lhsRank < rhsRank
++    }
++    return lhs.compare(rhs, options: .numeric) == .orderedDescending
++}
++
++private func ayuAIListModels(apiKey: String, proxy: ProxyServerSettings?, completion: @escaping ([String]) -> Void) {
++    if let cached = ayuDiscoveredModels {
++        completion(cached)
++        return
++    }
++    guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000") else {
++        completion([])
++        return
++    }
++    var request = URLRequest(url: url, timeoutInterval: 15.0)
++    request.httpShouldHandleCookies = false
++    request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
++    request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
++    let session = ayuGeminiSession(proxy: proxy)
++    session.dataTask(with: request, completionHandler: { data, _, _ in
++        session.finishTasksAndInvalidate()
++        var result: [String] = []
++        let excluded = ["tts", "image", "audio", "live", "embedding", "robotics", "computer-use", "native", "vision"]
++        if let json = data.flatMap({ try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any], let models = json["models"] as? [[String: Any]] {
++            for model in models {
++                guard let name = model["name"] as? String, let methods = model["supportedGenerationMethods"] as? [String], methods.contains("generateContent") else {
++                    continue
++                }
++                let id = name.hasPrefix("models/") ? String(name.dropFirst("models/".count)) : name
++                let lower = id.lowercased()
++                if lower.hasPrefix("gemini") && !excluded.contains(where: { lower.contains($0) }) {
++                    result.append(id)
++                }
++            }
++        }
++        result.sort(by: ayuModelPrecedes)
++        DispatchQueue.main.async {
++            if !result.isEmpty {
++                ayuDiscoveredModels = result
++            }
++            completion(result)
++        }
++    }).resume()
++}
++
++/// An ephemeral session, without cookies or cache, through Telegram's proxy when it is SOCKS5. An
++/// MTProto proxy only carries Telegram's own protocol, so with one the request goes direct.
++private func ayuGeminiSession(proxy: ProxyServerSettings?) -> URLSession {
++    let configuration = URLSessionConfiguration.ephemeral
++    configuration.httpCookieStorage = nil
++    configuration.urlCache = nil
++    if let proxy = proxy, case let .socks5(username, password) = proxy.connection, #available(iOS 17.0, *), let port = NWEndpoint.Port(rawValue: UInt16(clamping: proxy.port)) {
++        let proxyConfiguration = ProxyConfiguration(socksv5Proxy: .hostPort(host: NWEndpoint.Host(proxy.host), port: port))
++        if let username = username, let password = password, !username.isEmpty {
++            proxyConfiguration.applyCredential(username: username, password: password)
++        }
++        configuration.proxyConfigurations = [proxyConfiguration]
++    }
++    return URLSession(configuration: configuration)
 +}
 +
 +private struct AyuGeminiResult {
@@ -636,10 +715,11 @@ index 00000000..1f6c097d
 +        completion(AyuGeminiResult(status: 0, json: nil, error: nil, elapsed: 0.0))
 +        return
 +    }
-+    // The thinking budget counts against the output limit, so the answer keeps its full room.
-+    var generationConfig: [String: Any] = ["temperature": 0.2, "maxOutputTokens": maxOutputTokens + thinkingBudget]
-+    // 2.5 models think as long as they like unless given a budget, which is most of their delay.
-+    if model.hasPrefix("gemini-2.5-") {
++    // Thinking counts against the output limit, so the answer keeps its full room: 2.5 models get the
++    // given budget, newer ones think as they choose and get headroom for it.
++    let isGemini25 = model.hasPrefix("gemini-2.5-")
++    var generationConfig: [String: Any] = ["temperature": 0.2, "maxOutputTokens": maxOutputTokens + (isGemini25 ? thinkingBudget : 4096)]
++    if isGemini25 {
 +        generationConfig["thinkingConfig"] = ["thinkingBudget": thinkingBudget]
 +    }
 +    let body: [String: Any] = [
@@ -655,18 +735,8 @@ index 00000000..1f6c097d
 +    request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
 +    request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 +
-+    let configuration = URLSessionConfiguration.ephemeral
-+    configuration.httpCookieStorage = nil
-+    configuration.urlCache = nil
-+    if let proxy = proxy, case let .socks5(username, password) = proxy.connection, #available(iOS 17.0, *), let port = NWEndpoint.Port(rawValue: UInt16(clamping: proxy.port)) {
-+        let proxyConfiguration = ProxyConfiguration(socksv5Proxy: .hostPort(host: NWEndpoint.Host(proxy.host), port: port))
-+        if let username = username, let password = password, !username.isEmpty {
-+            proxyConfiguration.applyCredential(username: username, password: password)
-+        }
-+        configuration.proxyConfigurations = [proxyConfiguration]
-+    }
 +    let startTime = CFAbsoluteTimeGetCurrent()
-+    let session = URLSession(configuration: configuration)
++    let session = ayuGeminiSession(proxy: proxy)
 +    session.dataTask(with: request, completionHandler: { data, response, error in
 +        session.finishTasksAndInvalidate()
 +        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -989,20 +1059,22 @@ index 00000000..1f6c097d
 +    let anonymized = ayuAIAnonymize(text, names: names)
 +    let run: () -> Void = { [weak resultController] in
 +        resultController?.showLoading()
-+        let models = ayuAIModelOrder(AyuSettings.shared.values.aiModel, action: action)
 +        ayuAIWithProxy(context: context, { proxy in
-+            ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: models, proxy: proxy, attempt: { model in
-+                DispatchQueue.main.async {
-+                    resultController?.setModel(model)
-+                }
-+            }, completion: { answer, error in
-+                DispatchQueue.main.async {
-+                    if let answer = answer {
-+                        resultController?.show(text: answer, isError: false)
-+                    } else {
-+                        resultController?.show(text: error ?? "Неизвестная ошибка.", isError: true)
++            ayuAIListModels(apiKey: apiKey, proxy: proxy, completion: { discovered in
++                let models = ayuAIModelOrder(AyuSettings.shared.values.aiModel, action: action, discovered: discovered)
++                ayuAIRequest(action: action, text: anonymized, apiKey: apiKey, models: models, proxy: proxy, attempt: { model in
++                    DispatchQueue.main.async {
++                        resultController?.setModel(model)
 +                    }
-+                }
++                }, completion: { answer, error in
++                    DispatchQueue.main.async {
++                        if let answer = answer {
++                            resultController?.show(text: answer, isError: false)
++                        } else {
++                            resultController?.show(text: error ?? "Неизвестная ошибка.", isError: true)
++                        }
++                    }
++                })
 +            })
 +        })
 +    }
@@ -1033,39 +1105,48 @@ index 00000000..1f6c097d
 +    let run: () -> Void = { [weak resultController] in
 +        resultController?.showLoading()
 +        ayuAIWithProxy(context: context, { proxy in
-+            let lines = AyuSpeedTestLines(count: ayuAIModels.count)
-+            for (index, model) in ayuAIModels.enumerated() {
-+                ayuGeminiCall(model: model.id, instruction: "Ответь одним словом.", text: "Скажи: да", maxOutputTokens: 16, thinkingBudget: 0, apiKey: apiKey, proxy: proxy, timeout: 20.0, completion: { result in
-+                    let verdict: String
-+                    if ayuGeminiAnswer(result.json) != nil {
-+                        let seconds = String(format: "%.1f", result.elapsed)
-+                        if result.elapsed < 2.0 {
-+                            verdict = "🟢 \(seconds) с — свободна"
-+                        } else if result.elapsed < 5.0 {
-+                            verdict = "🟡 \(seconds) с — загружена"
++            ayuAIListModels(apiKey: apiKey, proxy: proxy, completion: { discovered in
++                // The aliases, then the other models Google lists for the key.
++                var testedModels = ayuAIModels.map(\.id)
++                for model in discovered where !testedModels.contains(model) && testedModels.count < 8 {
++                    testedModels.append(model)
++                }
++                let lines = AyuSpeedTestLines(count: testedModels.count)
++                for (index, modelId) in testedModels.enumerated() {
++                    ayuGeminiCall(model: modelId, instruction: "Ответь одним словом.", text: "Скажи: да", maxOutputTokens: 16, thinkingBudget: 0, apiKey: apiKey, proxy: proxy, timeout: 20.0, completion: { result in
++                        let verdict: String
++                        if ayuGeminiAnswer(result.json) != nil {
++                            let seconds = String(format: "%.1f", result.elapsed)
++                            if result.elapsed < 2.0 {
++                                verdict = "🟢 \(seconds) с — свободна"
++                            } else if result.elapsed < 5.0 {
++                                verdict = "🟡 \(seconds) с — загружена"
++                            } else {
++                                verdict = "🟠 \(seconds) с — сильно загружена"
++                            }
++                        } else if result.status == 503 || result.status == 500 {
++                            verdict = "🔴 перегружена"
++                        } else if result.status == 429 {
++                            verdict = "🔴 лимит запросов исчерпан"
++                        } else if result.status == 404 {
++                            verdict = "⚪️ недоступна"
++                        } else if result.error != nil {
++                            verdict = "🔴 нет ответа"
++                        } else if result.status == 200 {
++                            verdict = "🟠 ответила пустым текстом"
 +                        } else {
-+                            verdict = "🟠 \(seconds) с — сильно загружена"
++                            verdict = "🔴 ошибка \(result.status)"
 +                        }
-+                    } else if result.status == 503 || result.status == 500 {
-+                        verdict = "🔴 перегружена"
-+                    } else if result.status == 429 {
-+                        verdict = "🔴 лимит запросов исчерпан"
-+                    } else if result.status == 404 {
-+                        verdict = "⚪️ недоступна"
-+                    } else if result.error != nil {
-+                        verdict = "🔴 нет ответа"
-+                    } else {
-+                        verdict = "🔴 ошибка \(result.status)"
-+                    }
-+                    DispatchQueue.main.async {
-+                        lines.items[index] = "\(ayuAIModelTitle(model.id))\n\(verdict)"
-+                        if lines.items.allSatisfy({ $0 != nil }) {
-+                            let text = lines.items.compactMap { $0 }.joined(separator: "\n\n") + "\n\nВремя ответа на короткий вопрос через ваше соединение. Чем меньше, тем быстрее модель ответит и на сообщение."
-+                            resultController?.show(text: text, isError: false)
++                        DispatchQueue.main.async {
++                            lines.items[index] = "\(ayuAIModelTitle(modelId))\n\(verdict)"
++                            if lines.items.allSatisfy({ $0 != nil }) {
++                                let text = lines.items.compactMap { $0 }.joined(separator: "\n\n") + "\n\nВремя ответа на короткий вопрос через ваше соединение. Чем меньше, тем быстрее модель ответит и на сообщение. Кроме трёх основных, проверяются модели, которые Google открыл для вашего ключа; они используются как запасные."
++                                resultController?.show(text: text, isError: false)
++                            }
 +                        }
-+                    }
-+                })
-+            }
++                    })
++                }
++            })
 +        })
 +    }
 +    resultController.retry = run
@@ -1300,7 +1381,7 @@ index 00000000..5175d7cb
 +}
 diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 new file mode 100644
-index 00000000..7c3f0c8e
+index 00000000..1c1c4a99
 --- /dev/null
 +++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
 @@ -0,0 +1,295 @@
@@ -1557,7 +1638,7 @@ index 00000000..7c3f0c8e
 +            choice(.aiModel, .aiModel(model.id), model.title, values.aiModel == model.id)
 +        }
 +        add { .testAIModels(id: $0, section: .aiModel) }
-+        footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее; для «Ответить на вопрос» 2.5 Flash сначала обдумывает задачу, это дольше, но решения вернее. «Проверить скорость» спрашивает все модели и показывает, какая сейчас свободна.")
++        footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее; Pro решает сложные задачи лучше всех, но на бесплатном тарифе у неё маленький лимит. Если модель недоступна, приложение берёт другие, которые Google открыл для вашего ключа. «Проверить скорость» спрашивает все модели и показывает, какая сейчас свободна.")
 +    }
 +
 +    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
@@ -2817,7 +2898,7 @@ index 1ceb46bc..80b84def 100644
          self.buildConfig = buildConfig
          let signatureDict = BuildConfigExtra.signatureDict()
 diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
-index 1ade8c01..312cea32 100644
+index 1ade8c01..c07bf8ea 100644
 --- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 +++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 @@ -31,6 +31,7 @@ import Pasteboard
@@ -2828,7 +2909,7 @@ index 1ade8c01..312cea32 100644
  import TextNodeWithEntities
  import ChatControllerInteraction
  import ChatMessageItemCommon
-@@ -1348,6 +1349,65 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+@@ -1348,6 +1349,66 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
          }
          
          let isCopyProtected = chatPresentationInterfaceState.copyProtectionEnabled || message.isCopyProtected()
@@ -2880,9 +2961,10 @@ index 1ade8c01..312cea32 100644
 +                })))
 +                subItems.append(.separator)
 +                for aiAction in [AyuAIAction.summarize, AyuAIAction.answer] {
-+                    subItems.append(.action(ContextMenuActionItem(text: aiAction.title, icon: { _ in
-+                        return nil
-+                    }, action: { c, _ in
++                    let symbolName = aiAction == .summarize ? "text.alignleft" : "questionmark.circle"
++                    subItems.append(.action(ContextMenuActionItem(text: aiAction.title, icon: { theme in
++                        return generateTintedImage(image: UIImage(systemName: symbolName, withConfiguration: UIImage.SymbolConfiguration(pointSize: 18.0, weight: .regular)), color: theme.actionSheet.primaryTextColor)
++                    }, iconPosition: .left, action: { c, _ in
 +                        c?.dismiss(completion: {
 +                            ayuAIPresent(context: context, action: aiAction, text: aiText, names: aiNames, window: aiWindow)
 +                        })
