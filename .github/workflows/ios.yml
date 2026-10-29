@@ -21,10 +21,11 @@ on:
       - "patches/**"
       - "scripts/**"
       - "runtime/**"
+      - ".github/workflows/ios.yml"
 
 concurrency:
   group: ayugram-ios
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read
@@ -131,7 +132,8 @@ jobs:
         run: python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
 
       - name: Restore Bazel cache
-        uses: actions/cache@v4
+        id: bazel-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/telegram-bazel-cache
           key: bazel-${{ env.TELEGRAM_TAG }}-${{ hashFiles('patches/**') }}
@@ -174,3 +176,11 @@ jobs:
           name: AyuGram-iOS-${{ env.AYUGRAM_BUILD_NUMBER }}
           path: artifacts/*.ipa
           retention-days: 30
+
+      - name: Save Bazel cache
+        if: always() && steps.bazel-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/telegram-bazel-cache
+          key: bazel-${{ env.TELEGRAM_TAG }}-${{ hashFiles('patches/**') }}
