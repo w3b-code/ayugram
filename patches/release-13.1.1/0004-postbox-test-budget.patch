@@ -1,0 +1,13 @@
+diff --git a/submodules/Postbox/BUILD b/submodules/Postbox/BUILD
+index c619c0c..49797ac 100644
+--- a/submodules/Postbox/BUILD
++++ b/submodules/Postbox/BUILD
+@@ -112,6 +112,8 @@ ios_test_runner(
+ 
+ ios_unit_test(
+     name = "PostboxTests",
++    # Include cold XCTest startup and the complete database/cache cleanup suite.
++    timeout = "long",
+     minimum_os_version = "15.0",
+     runner = ":PostboxTestRunner",
+     deps = [
