@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import uuid
 
 
 def available_runtimes():
@@ -29,6 +30,18 @@ def configure(root: Path):
         raise RuntimeError('PostboxTestRunner definition changed upstream')
     build.write_text(result)
     print('Database tests:', selected['name'], '/ iOS', runtime['version'])
+    # The upstream runner hides simctl's creation error and returns only SIM_ERROR.
+    # Create a fresh device using the exact runtime/device identifiers, boot it,
+    # and pass its destination to XCTest so failures retain the actual diagnosis.
+    simulator = subprocess.check_output([
+        'xcrun', 'simctl', 'create', 'AyuGram-tests-' + uuid.uuid4().hex[:8],
+        selected['identifier'], runtime['identifier'],
+    ], text=True).strip()
+    subprocess.run(['xcrun', 'simctl', 'boot', simulator], check=True)
+    subprocess.run(['xcrun', 'simctl', 'bootstatus', simulator, '-b'], check=True, timeout=240)
+    with (root / '.bazelrc').open('a') as configuration:
+        configuration.write('\ntest --test_arg=--destination=platform=ios_simulator,id=' + simulator + '\n')
+    print('Booted database test destination:', simulator, flush=True)
 
 
 if __name__ == '__main__':
