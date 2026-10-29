@@ -21,10 +21,11 @@ on:
       - "patches/**"
       - "scripts/**"
       - "runtime/**"
+      - ".github/workflows/ios.yml"
 
 concurrency:
   group: ayugram-ios
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read
