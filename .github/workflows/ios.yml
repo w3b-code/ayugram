@@ -16,12 +16,18 @@ on:
         default: "xcode-27"
         required: true
   push:
-    branches: [main, fix/notification-app-group]
+    branches: [ios]
     paths:
       - "patches/**"
       - "scripts/**"
       - "runtime/**"
-      - ".github/workflows/build.yml"
+
+concurrency:
+  group: ayugram-ios
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   TELEGRAM_TAG: ${{ inputs.telegram_tag || 'release-13.1.1' }}
@@ -35,6 +41,8 @@ jobs:
     steps:
       - name: Checkout this repository
         uses: actions/checkout@v4
+        with:
+          ref: ios
 
       - name: Check API credentials
         env:

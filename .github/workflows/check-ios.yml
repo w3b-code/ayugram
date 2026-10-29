@@ -1,12 +1,13 @@
-name: Check App Group configuration
+name: Check iOS
 
 on:
   push:
+    branches: [ios]
     paths:
       - "scripts/**"
       - "runtime/**"
       - "tests/**"
-      - ".github/workflows/checks.yml"
+      - ".github/workflows/check-ios.yml"
   workflow_dispatch:
 
 jobs:

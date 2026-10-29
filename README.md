@@ -1,5 +1,9 @@
 # AyuGram для iOS
 
+Ветка **ios** — версия для iPhone. [Обзор репозитория](https://github.com/w3b-code/ayugram/tree/main) · [Версия для Windows](https://github.com/w3b-code/ayugram/tree/desktop).
+
+В Actions выберите **Build AyuGram iOS**. Workflow всегда собирает содержимое ветки `ios`.
+
 Аналог AyuGram на базе открытого [Telegram-iOS](https://github.com/TelegramMessenger/Telegram-iOS) (GPL-2.0).
 Функции взяты из разбора Android-сборки `vanilla-AyuGram-lite-20261005.apk`, подробности в
 [docs/APK_ANALYSIS.md](docs/APK_ANALYSIS.md).
