@@ -1,0 +1,230 @@
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift
+index 5175d7c..925250d 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuDeletedMessagesController.swift
+@@ -144,7 +144,7 @@ private func ayuDeletedMessagesEntries(period: AyuDeletedMessagesPeriod, message
+     }
+     entries.append(.messagesHeader("СООБЩЕНИЯ: \(messages.count)"))
+     if messages.isEmpty {
+-        entries.append(.info("За этот период удалённых сообщений нет. В список попадают сообщения, удалённые после установки этой версии."))
++        entries.append(.info("В этом чате за выбранный период нет сохранённых удалённых сообщений."))
+         return entries
+     }
+ 
+@@ -179,10 +179,10 @@ private func ayuDeletedMessagesEntries(period: AyuDeletedMessagesPeriod, message
+     return entries
+ }
+ 
+-/// Saved deleted messages from every chat, newest deletion first. A row opens the message in its
+-/// chat, where its photos and files open as usual.
+-public func ayuDeletedMessagesController(context: AccountContext) -> ViewController {
+-    let periodPromise = ValuePromise<AyuDeletedMessagesPeriod>(.week, ignoreRepeated: true)
++/// Saved deletions in the chat whose avatar menu opened this screen.
++/// A row opens its message, where photos and files open as usual.
++public func ayuDeletedMessagesController(context: AccountContext, peerId: EnginePeer.Id) -> ViewController {
++    let periodPromise = ValuePromise<AyuDeletedMessagesPeriod>(.all, ignoreRepeated: true)
+     var openMessageImpl: ((AyuDeletedMessage) -> Void)?
+ 
+     let arguments = AyuDeletedMessagesArguments(selectPeriod: { period in
+@@ -194,7 +194,7 @@ public func ayuDeletedMessagesController(context: AccountContext) -> ViewControl
+     let messages: Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError> = periodPromise.get()
+     |> mapToSignal { period -> Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError> in
+         let now = Int32(Date().timeIntervalSince1970)
+-        let loaded: Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError> = ayuDeletedMessages(account: context.account, since: period.since(now: now))
++        let loaded: Signal<(AyuDeletedMessagesPeriod, [AyuDeletedMessage]?), NoError> = ayuDeletedMessages(account: context.account, peerId: peerId, since: period.since(now: now))
+         |> map { messages -> (AyuDeletedMessagesPeriod, [AyuDeletedMessage]?) in
+             return (period, messages)
+         }
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+index 1c1c4a9..0a9665e 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+@@ -11,12 +11,10 @@ import AyuGramSettings
+ 
+ private final class AyuGramSettingsControllerArguments {
+     let update: ((inout AyuSettingsValues) -> Void) -> Void
+-    let openDeletedMessages: () -> Void
+     let testAIModels: () -> Void
+ 
+-    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void, openDeletedMessages: @escaping () -> Void, testAIModels: @escaping () -> Void) {
++    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void, testAIModels: @escaping () -> Void) {
+         self.update = update
+-        self.openDeletedMessages = openDeletedMessages
+         self.testAIModels = testAIModels
+     }
+ }
+@@ -124,19 +122,18 @@ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+     case choice(id: Int32, section: AyuGramSettingsSection, choice: AyuGramChoice, title: String, checked: Bool)
+     case footer(id: Int32, section: AyuGramSettingsSection, text: String)
+     case apiKey(id: Int32, section: AyuGramSettingsSection, text: String)
+-    case deletedMessages(id: Int32, section: AyuGramSettingsSection)
+     case testAIModels(id: Int32, section: AyuGramSettingsSection)
+ 
+     var section: ItemListSectionId {
+         switch self {
+-        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _), let .deletedMessages(_, section), let .testAIModels(_, section):
++        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _), let .testAIModels(_, section):
+             return section.rawValue
+         }
+     }
+ 
+     var stableId: Int32 {
+         switch self {
+-        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _), let .deletedMessages(id, _), let .testAIModels(id, _):
++        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _), let .testAIModels(id, _):
+             return id
+         }
+     }
+@@ -160,10 +157,6 @@ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+             })
+         case let .footer(_, _, text):
+             return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
+-        case .deletedMessages:
+-            return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: "Удалённые сообщения", label: "", sectionId: self.section, style: .blocks, action: {
+-                arguments.openDeletedMessages()
+-            })
+         case .testAIModels:
+             return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: "Проверить скорость моделей", label: "", sectionId: self.section, style: .blocks, action: {
+                 arguments.testAIModels()
+@@ -221,12 +214,11 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues) -> [AyuGramSettin
+     choice(.sendWithoutSound, .sendWithoutSound(.inGhostMode), "В режиме призрака", values.sendWithoutSound == .inGhostMode)
+ 
+     header(.saving, "СОХРАНЕНИЕ СООБЩЕНИЙ")
+-    add { .deletedMessages(id: $0, section: .saving) }
+     toggle(.saving, .saveDeleted, "Сохранять удалённые", values.saveDeletedMessages)
+     toggle(.saving, .saveHistory, "Сохранять историю правок", values.saveMessagesHistory)
+     toggle(.saving, .semiTransparent, "Полупрозрачные удалённые", values.semiTransparentDeletedMessages)
+     toggle(.saving, .keepAlive, "Держать в фоне", values.keepAliveInBackground)
+-    footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑, а все сразу видны в «Удалённых сообщениях». История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить. «Держать в фоне» не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи). Закрытое смахиванием приложение не работает.")
++    footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑. Их список открывается долгим нажатием на аватарку чата → «Удалённые сообщения». История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить. «Держать в фоне» не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи). Закрытое смахиванием приложение не работает.")
+ 
+     header(.interface, "ИНТЕРФЕЙС")
+     toggle(.interface, .disableAds, "Блокировать рекламу", values.disableAds)
+@@ -264,12 +256,9 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues) -> [AyuGramSettin
+ }
+ 
+ public func ayuGramSettingsController(context: AccountContext) -> ViewController {
+-    var pushControllerImpl: ((ViewController) -> Void)?
+     var windowImpl: (() -> UIWindow?)?
+     let arguments = AyuGramSettingsControllerArguments(update: { f in
+         AyuSettings.shared.update(f)
+-    }, openDeletedMessages: {
+-        pushControllerImpl?(ayuDeletedMessagesController(context: context))
+     }, testAIModels: {
+         ayuAIPresentSpeedTest(context: context, window: windowImpl?())
+     })
+@@ -285,9 +274,6 @@ public func ayuGramSettingsController(context: AccountContext) -> ViewController
+     }
+ 
+     let controller = ItemListController(context: context, state: signal)
+-    pushControllerImpl = { [weak controller] c in
+-        (controller?.navigationController as? NavigationController)?.pushViewController(c)
+-    }
+     windowImpl = { [weak controller] in
+         return controller?.view.window
+     }
+diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+index c1f0add..c710605 100644
+--- a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
++++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+@@ -200,13 +200,13 @@ private func ayuMediaDescription(_ media: [Media]) -> String? {
+     return nil
+ }
+ 
+-/// The saved deleted messages deleted at or after `since`, newest deletion first.
+-public func ayuDeletedMessages(account: Account, since: Int32) -> Signal<[AyuDeletedMessage], NoError> {
++/// The saved deletions in one chat at or after `since`, newest deletion first.
++public func ayuDeletedMessages(account: Account, peerId: EnginePeer.Id, since: Int32) -> Signal<[AyuDeletedMessage], NoError> {
+     return account.postbox.transaction { transaction -> [AyuDeletedMessage] in
+         let index = transaction.getPreferencesEntry(key: ayuDeletedMessagesIndexKey)?.get(AyuDeletedMessagesIndex.self) ?? AyuDeletedMessagesIndex(items: [])
+         var result: [AyuDeletedMessage] = []
+         var seen = Set<MessageId>()
+-        for item in index.items.reversed() where item.deletedAt >= since {
++        for item in index.items.reversed() where item.peerId == peerId.toInt64() && item.deletedAt >= since {
+             let id = MessageId(peerId: PeerId(item.peerId), namespace: item.namespace, id: item.id)
+             guard !seen.contains(id), let message = transaction.getMessage(id), message.ayuDeletedAttribute != nil else {
+                 continue
+diff --git a/submodules/TelegramUI/Sources/ChatController.swift b/submodules/TelegramUI/Sources/ChatController.swift
+index 3a218a3..6fa14a4 100644
+--- a/submodules/TelegramUI/Sources/ChatController.swift
++++ b/submodules/TelegramUI/Sources/ChatController.swift
+@@ -6083,6 +6083,27 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+                 guard let strongSelf = self, let peer = strongSelf.presentationInterfaceState.renderedPeer?.chatMainPeer else {
+                     return
+                 }
++
++                let chatItems: [ContextMenuItem] = [
++                    .action(ContextMenuActionItem(text: strongSelf.presentationData.strings.Conversation_ContextMenuOpenProfile, icon: { theme in
++                        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Info"), color: theme.contextMenu.primaryColor)
++                    }, action: { _, f in
++                        f(.dismissWithoutContent)
++                        self?.navigationButtonAction(.openChatInfo(expandAvatar: true, section: nil))
++                    })),
++                    .action(ContextMenuActionItem(text: strongSelf.presentationData.strings.Conversation_Search, icon: { theme in
++                        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Search"), color: theme.contextMenu.primaryColor)
++                    }, action: { _, f in
++                        f(.dismissWithoutContent)
++                        self?.interfaceInteraction?.beginMessageSearch(.everything, "")
++                    })),
++                    .action(ContextMenuActionItem(text: "Удалённые сообщения", icon: { theme in
++                        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Delete"), color: theme.contextMenu.primaryColor)
++                    }, action: { _, f in
++                        f(.dismissWithoutContent)
++                        self?.push(ayuDeletedMessagesController(context: context, peerId: peer.id))
++                    }))
++                ]
+                 
+                 let items: Signal<[ContextMenuItem], NoError>
+                 switch chatLocation {
+@@ -6091,15 +6112,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+                         TelegramEngine.EngineData.Item.Peer.CanViewStats(id: peer.id)
+                     )
+                     |> map { canViewStats -> [ContextMenuItem] in
+-                        var items: [ContextMenuItem] = []
+-                        
+-                        let openText = strongSelf.presentationData.strings.Conversation_ContextMenuOpenProfile
+-                        items.append(.action(ContextMenuActionItem(text: openText, icon: { theme in
+-                            return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Info"), color: theme.actionSheet.primaryTextColor)
+-                        }, action: { _, f in
+-                            f(.dismissWithoutContent)
+-                            self?.navigationButtonAction(.openChatInfo(expandAvatar: true, section: nil))
+-                        })))
++                        var items = chatItems
+                         
+                         if canViewStats {
+                             items.append(.action(ContextMenuActionItem(text: strongSelf.presentationData.strings.ChannelInfo_Stats, icon: { theme in
+@@ -6120,12 +6133,6 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+                                 strongSelf.push(statsController)
+                             })))
+                         }
+-                        items.append(.action(ContextMenuActionItem(text: strongSelf.presentationData.strings.Conversation_Search, icon: { theme in
+-                            return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Search"), color: theme.actionSheet.primaryTextColor)
+-                        }, action: { _, f in
+-                            f(.dismissWithoutContent)
+-                            self?.interfaceInteraction?.beginMessageSearch(.everything, "")
+-                        })))
+                                                 
+                         return items
+                     }
+@@ -6146,7 +6153,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+                             return []
+                         }
+                         
+-                        var items: [ContextMenuItem] = []
++                        var items = chatItems
+                         
+                         var isMuted = false
+                         switch threadData.notificationSettings.muteState {
+@@ -6370,12 +6377,6 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+                             })))
+                         }
+                         
+-                        items.append(.action(ContextMenuActionItem(text: strongSelf.presentationData.strings.Conversation_Search, icon: { theme in
+-                            return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Search"), color: theme.actionSheet.primaryTextColor)
+-                        }, action: { _, f in
+-                            f(.dismissWithoutContent)
+-                            self?.interfaceInteraction?.beginMessageSearch(.everything, "")
+-                        })))
+                         
+                         if threadId != 1 {
+                             var canOpenClose = false

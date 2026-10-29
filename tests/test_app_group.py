@@ -19,7 +19,8 @@ class AppGroupConfigurationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         build = self.root / "Telegram/BUILD"
         build.parent.mkdir(parents=True, exist_ok=True)
-        build.write_text(app_group.PLIST_ANCHOR + '    <key>CFBundleDisplayName</key>\n    <string>Telegram</string>\n    """\n)\n')
+        body = '    <key>CFBundleDisplayName</key>\n    <string>Telegram</string>\n    """\n)\n'
+        build.write_text(app_group.PLIST_ANCHOR + body + app_group.MAIN_PLIST_ANCHOR + body)
         for relative, count in app_group.SOURCES.items():
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,9 +35,11 @@ class AppGroupConfigurationTests(unittest.TestCase):
             text = (self.root / relative).read_text()
             self.assertEqual(text.count(app_group.LOOKUP), count)
             self.assertNotIn('"group.example.ayugram.5"', text)
-        fragment = (self.root / "Telegram/BUILD").read_text().split('"""')[1]
-        plist = plistlib.loads(('<plist version="1.0"><dict>' + fragment + '</dict></plist>').encode())
-        self.assertEqual(plist["AyuGramAppGroup"], "group.example.ayugram.5")
+        fragments = (self.root / "Telegram/BUILD").read_text().split('"""')[1::2]
+        self.assertEqual(len(fragments), 2)
+        for fragment in fragments:
+            plist = plistlib.loads(('<plist version="1.0"><dict>' + fragment + '</dict></plist>').encode())
+            self.assertEqual(plist["AyuGramAppGroup"], "group.example.ayugram.5")
         delegate = (self.root / app_group.APP_DELEGATE).read_text()
         self.assertLess(delegate.index("try ayuMigrateLegacyAppGroupData"), delegate.index(app_group.FALLBACK))
         helper = self.root / "submodules/TelegramUI/Sources/AyuGram/AyuAppGroupMigration.swift"
@@ -59,6 +62,14 @@ class AppGroupConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app_group.configure(self.root, "group.example.ayugram")
         self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*.swift")})
+
+    def test_missing_main_plist_fragment_rejected_before_writing(self):
+        build = self.root / "Telegram/BUILD"
+        build.write_text(build.read_text().replace(app_group.MAIN_PLIST_ANCHOR, 'name = "RenamedMainPlist"'))
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        with self.assertRaises(ValueError):
+            app_group.configure(self.root, "group.example.ayugram")
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
 
     @unittest.skipUnless(shutil.which("swiftc"), "Swift compiler required")
     def test_generated_lookup_compiles_with_warnings_as_errors(self):

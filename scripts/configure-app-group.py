@@ -25,6 +25,7 @@ PLIST_ANCHOR = '''    name = "AppNameInfoPlist",
     template =
     """
 '''
+MAIN_PLIST_ANCHOR = PLIST_ANCHOR.replace('"AppNameInfoPlist"', '"TelegramInfoPlist"').replace('template =\n', 'template = \n')
 APP_DELEGATE = "submodules/TelegramUI/Sources/AppDelegate.swift"
 FALLBACK = "        if maybeAppGroupUrl == nil {\n"
 MIGRATION = '''        // Import the previous sideloaded build's private data before opening any database.
@@ -57,15 +58,18 @@ def configure(root: Path, group: str) -> int:
         # unused, which fails the upstream build with -warnings-as-errors.
         updates[path] = text.replace(ORIGINAL, LOOKUP)
 
-    # This plist fragment is included by the app and all six iOS extensions.
+    # Extensions use AppNameInfoPlist; the app uses TelegramInfoPlist instead.
+    # Setting only the former silently leaves Bundle.main on the default group.
     build = root / "Telegram/BUILD"
     build_text = build.read_text()
-    if build_text.count(PLIST_ANCHOR) != 1:
-        raise ValueError("Telegram/BUILD: missing shared AppNameInfoPlist fragment")
-    updates[build] = build_text.replace(
-        PLIST_ANCHOR,
-        PLIST_ANCHOR + f"    <key>AyuGramAppGroup</key>\n    <string>{group}</string>\n",
-    )
+    for anchor in (PLIST_ANCHOR, MAIN_PLIST_ANCHOR):
+        if build_text.count(anchor) != 1:
+            raise ValueError("Telegram/BUILD: missing main or extension Info.plist fragment")
+        build_text = build_text.replace(
+            anchor,
+            anchor + f"    <key>AyuGramAppGroup</key>\n    <string>{group}</string>\n",
+        )
+    updates[build] = build_text
 
     delegate = root / APP_DELEGATE
     if updates[delegate].count(FALLBACK) != 1:

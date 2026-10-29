@@ -167,6 +167,9 @@ jobs:
             --configuration=release_arm64 \
             --outputBuildArtifactsPath=../artifacts
 
+      - name: Verify main app and extension App Groups in IPA
+        run: python3 scripts/verify-app-groups.py artifacts/Telegram.ipa
+
       - name: Rename IPA
         run: mv artifacts/Telegram.ipa "artifacts/AyuGram-iOS-${TELEGRAM_TAG}-${{ env.AYUGRAM_BUILD_NUMBER }}.ipa"
 

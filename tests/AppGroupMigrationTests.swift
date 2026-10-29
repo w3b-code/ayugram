@@ -10,8 +10,9 @@ struct AppGroupMigrationTests {
         let shared = root.appendingPathComponent("shared")
         let data = legacy.appendingPathComponent("telegram-data")
         try fm.createDirectory(at: data.appendingPathComponent("accounts-metadata"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: data.appendingPathComponent("account-123/postbox"), withIntermediateDirectories: true)
         try fm.createDirectory(at: shared, withIntermediateDirectories: true)
-        let fixtures = [".tempkey": "key-and-salt", "accounts-metadata/db": "account-records", "accounts-metadata/db-wal": "pending-transactions"]
+        let fixtures = [".tempkey": "key-and-salt", "accounts-metadata/db": "account-records", "accounts-metadata/db-wal": "pending-transactions", "account-123/postbox/db": "real-messages"]
         for (path, value) in fixtures {
             try Data(value.utf8).write(to: data.appendingPathComponent(path))
         }
@@ -33,6 +34,30 @@ struct AppGroupMigrationTests {
         precondition(retainedKey == Data("new-shared-key".utf8))
         try ayuMigrateLegacyAppGroupData(from: root.appendingPathComponent("missing-source"), to: shared)
         try ayuMigrateLegacyAppGroupData(from: legacy, to: legacy)
+
+        // A push can initialize the new group before the app imports its account.
+        let bootstrapContainer = root.appendingPathComponent("bootstrap")
+        let bootstrap = bootstrapContainer.appendingPathComponent("telegram-data")
+        try fm.createDirectory(at: bootstrap.appendingPathComponent("accounts-metadata"), withIntermediateDirectories: true)
+        try Data("empty-metadata".utf8).write(to: bootstrap.appendingPathComponent("accounts-metadata/db"))
+        try Data("bootstrap-key".utf8).write(to: bootstrap.appendingPathComponent(".tempkey"))
+        try ayuMigrateLegacyAppGroupData(from: legacy, to: bootstrapContainer)
+        let importedKey = try Data(contentsOf: bootstrap.appendingPathComponent(".tempkey"))
+        precondition(importedKey == Data("key-and-salt".utf8))
+        let importedMessages = try Data(contentsOf: bootstrap.appendingPathComponent("account-123/postbox/db"))
+        precondition(importedMessages == Data("real-messages".utf8))
+        let backups = try fm.contentsOfDirectory(at: bootstrapContainer, includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix(".ayugram-bootstrap-") }
+        precondition(backups.count == 1)
+        let backupKey = try Data(contentsOf: backups[0].appendingPathComponent(".tempkey"))
+        precondition(backupKey == Data("bootstrap-key".utf8), "The bootstrap must remain recoverable")
+
+        // Unrecognized shared data is never treated as an empty bootstrap.
+        let protectedContainer = root.appendingPathComponent("protected")
+        let protectedRoot = protectedContainer.appendingPathComponent("telegram-data")
+        try fm.createDirectory(at: protectedRoot, withIntermediateDirectories: true)
+        try Data("keep".utf8).write(to: protectedRoot.appendingPathComponent("unknown-database"))
+        try ayuMigrateLegacyAppGroupData(from: legacy, to: protectedContainer)
+        precondition(!fm.fileExists(atPath: protectedRoot.appendingPathComponent(".tempkey").path))
 
         // A failed copy leaves the old installation readable and exposes no partial database.
         let missingDestination = root.appendingPathComponent("missing-parent/shared")
