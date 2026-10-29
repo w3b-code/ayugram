@@ -7,6 +7,10 @@ on:
         description: "Тег Telegram-iOS (нужна папка patches/<тег>)"
         default: "release-13.1.1"
         required: true
+      app_group_id:
+        description: "App Group из профиля Feather (пусто = AYUGRAM_APP_GROUP или стандартная)"
+        default: ""
+        required: false
       runner:
         description: "Раннер: xcode-27 для 13.1.x, macos-26 для 13.0.0"
         default: "xcode-27"
@@ -15,10 +19,13 @@ on:
     branches: [main]
     paths:
       - "patches/**"
+      - "scripts/**"
+      - "runtime/**"
       - ".github/workflows/build.yml"
 
 env:
   TELEGRAM_TAG: ${{ inputs.telegram_tag || 'release-13.1.1' }}
+  AYUGRAM_APP_GROUP: ${{ inputs.app_group_id || vars.AYUGRAM_APP_GROUP }}
 
 jobs:
   build:
@@ -76,6 +83,9 @@ jobs:
             echo "Applying $p"
             git apply --whitespace=nowarn "$p"
           done
+
+      - name: Configure provisioned App Group
+        run: python3 scripts/configure-app-group.py telegram
 
       - name: Write build configuration
         working-directory: telegram

@@ -1,0 +1,22 @@
+name: Check App Group configuration
+
+on:
+  push:
+    paths:
+      - "scripts/**"
+      - "runtime/**"
+      - "tests/**"
+      - ".github/workflows/checks.yml"
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test App Group configuration
+        run: python3 -m unittest discover -s tests
+      - name: Test data migration
+        run: |
+          swiftc runtime/AyuAppGroupMigration.swift tests/AppGroupMigrationTests.swift -o "$RUNNER_TEMP/app-group-tests"
+          "$RUNNER_TEMP/app-group-tests"
