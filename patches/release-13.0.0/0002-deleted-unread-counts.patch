@@ -399,7 +399,7 @@ index 0000000..32cab64
 +    }
 +}
 diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
-index 80b1a42..f4fdcf1 100644
+index 80b1a42..c1f0add 100644
 --- a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
 +++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
 @@ -9,6 +9,7 @@ internal import TelegramApi
@@ -468,7 +468,7 @@ index 80b1a42..f4fdcf1 100644
 +    for peerId in Set(ids.map { $0.peerId }) {
 +        transaction.setNeedsIncomingReadStateSynchronization(peerId, preservePendingPush: true)
 +    }
-+    transaction.updatePreferencesEntry(key: key, { _ in CodableEntry(AyuUnreadRepairState(completed: true)) })
++    transaction.updatePreferencesEntry(key: key, { _ in PreferencesEntry(AyuUnreadRepairState(completed: true)) })
 +}
 diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
 index a1372c5..8346bb8 100644
