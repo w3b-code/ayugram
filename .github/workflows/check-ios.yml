@@ -21,3 +21,7 @@ jobs:
         run: |
           swiftc runtime/AyuAppGroupMigration.swift tests/AppGroupMigrationTests.swift -o "$RUNNER_TEMP/app-group-tests"
           "$RUNNER_TEMP/app-group-tests"
+      - name: Test notification payload fallback and safe diagnostics
+        run: |
+          swiftc -warnings-as-errors runtime/AyuNotificationDiagnostics.swift tests/NotificationDiagnosticsTests.swift -o "$RUNNER_TEMP/notification-tests"
+          "$RUNNER_TEMP/notification-tests"

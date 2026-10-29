@@ -44,6 +44,9 @@ jobs:
         with:
           ref: ios
 
+      - name: Set iOS build number
+        run: echo "AYUGRAM_BUILD_NUMBER=$((100 + ${{ github.run_number }}))" >> "$GITHUB_ENV"
+
       - name: Check API credentials
         env:
           API_ID: ${{ secrets.TELEGRAM_API_ID }}
@@ -95,6 +98,9 @@ jobs:
       - name: Configure provisioned App Group
         run: python3 scripts/configure-app-group.py telegram
 
+      - name: Configure notification delivery and diagnostics
+        run: python3 scripts/configure-notifications.py telegram
+
       - name: Write build configuration
         working-directory: telegram
         env:
@@ -132,6 +138,20 @@ jobs:
           restore-keys: |
             bazel-${{ env.TELEGRAM_TAG }}-
 
+      - name: Select installed simulator for database tests
+        run: python3 scripts/select-test-simulator.py telegram
+
+      - name: Test deleted-message counters and chat ordering
+        working-directory: telegram
+        run: |
+          python3 build-system/Make/Make.py \
+            --overrideXcodeVersion \
+            --cacheDir="$HOME/telegram-bazel-cache" \
+            test \
+            --configurationPath=../ayugram-configuration.json \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --target=//submodules/Postbox:PostboxTests
+
       - name: Build
         working-directory: telegram
         run: |
@@ -141,16 +161,16 @@ jobs:
             build \
             --configurationPath=../ayugram-configuration.json \
             --codesigningInformationPath=build-system/fake-codesigning \
-            --buildNumber=${{ github.run_number }} \
+            --buildNumber=${{ env.AYUGRAM_BUILD_NUMBER }} \
             --configuration=release_arm64 \
             --outputBuildArtifactsPath=../artifacts
 
       - name: Rename IPA
-        run: mv artifacts/Telegram.ipa "artifacts/AyuGram-iOS-${TELEGRAM_TAG}-${{ github.run_number }}.ipa"
+        run: mv artifacts/Telegram.ipa "artifacts/AyuGram-iOS-${TELEGRAM_TAG}-${{ env.AYUGRAM_BUILD_NUMBER }}.ipa"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: AyuGram-iOS-${{ github.run_number }}
+          name: AyuGram-iOS-${{ env.AYUGRAM_BUILD_NUMBER }}
           path: artifacts/*.ipa
           retention-days: 30
