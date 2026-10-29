@@ -16,7 +16,7 @@ on:
         default: "xcode-27"
         required: true
   push:
-    branches: [main]
+    branches: [main, fix/notification-app-group]
     paths:
       - "patches/**"
       - "scripts/**"

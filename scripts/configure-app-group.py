@@ -19,6 +19,12 @@ SOURCES = {
     "submodules/WidgetItems/Sources/WidgetItems.swift": 1,
 }
 ORIGINAL = r'"group.\(baseAppBundleId)"'
+LOOKUP = '(Bundle.main.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String) ?? ' + ORIGINAL
+PLIST_ANCHOR = '''    name = "AppNameInfoPlist",
+    extension = "plist",
+    template =
+    """
+'''
 APP_DELEGATE = "submodules/TelegramUI/Sources/AppDelegate.swift"
 FALLBACK = "        if maybeAppGroupUrl == nil {\n"
 MIGRATION = '''        // Import the previous sideloaded build's private data before opening any database.
@@ -47,7 +53,19 @@ def configure(root: Path, group: str) -> int:
         text = path.read_text()
         if text.count(ORIGINAL) != expected:
             raise ValueError(f"{relative}: expected {expected} App Group references; check the Telegram tag and AyuGram patch")
-        updates[path] = text.replace(ORIGINAL, '"' + group + '"')
+        # Keep the bundle-derived fallback: some scopes otherwise leave baseAppBundleId
+        # unused, which fails the upstream build with -warnings-as-errors.
+        updates[path] = text.replace(ORIGINAL, LOOKUP)
+
+    # This plist fragment is included by the app and all six iOS extensions.
+    build = root / "Telegram/BUILD"
+    build_text = build.read_text()
+    if build_text.count(PLIST_ANCHOR) != 1:
+        raise ValueError("Telegram/BUILD: missing shared AppNameInfoPlist fragment")
+    updates[build] = build_text.replace(
+        PLIST_ANCHOR,
+        PLIST_ANCHOR + f"    <key>AyuGramAppGroup</key>\n    <string>{group}</string>\n",
+    )
 
     delegate = root / APP_DELEGATE
     if updates[delegate].count(FALLBACK) != 1:
