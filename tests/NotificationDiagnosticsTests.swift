@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
 
 @main
 struct NotificationDiagnosticsTests {
@@ -18,6 +21,50 @@ struct NotificationDiagnosticsTests {
         precondition(Diagnostics.alert(from: ["call_id": "1", "aps": ["alert": "call"]]) == nil)
         precondition(Diagnostics.alert(from: ["encryption_id": "1", "aps": ["alert": "secret chat"]]) == nil)
 
+        // Reading on desktop must never turn the generic outer APNs alert into a new message.
+        for peer in ["from_id", "chat_id", "channel_id"] {
+            let readPush: [String: Any] = ["loc-key": "READ_HISTORY", peer: "42", "max_id": "10", "aps": ["alert": "You have a new message"]]
+            precondition(Diagnostics.isServicePayload(readPush))
+            precondition(Diagnostics.alert(from: readPush) == nil)
+        }
+        for key in ["READ_REACTION", "READ_STORIES", "MESSAGE_DELETED", "MESSAGE_MUTED", "SESSION_REVOKE"] {
+            precondition(Diagnostics.isServicePayload(["loc-key": key]))
+        }
+        let ordinaryPushes: [[String: Any]] = [
+            ["from_id": "42", "msg_id": "11", "aps": ["alert": "New message"]],
+            ["channel_id": "42", "msg_id": "11", "aps": ["alert": ["title": "Channel", "body": "New post"]]],
+            ["loc-key": "CONF_CALL_REQUEST", "call_id": "1"],
+            ["loc-key": "CONF_VIDEOCALL_REQUEST", "call_id": "1"],
+            ["loc-key": "UNKNOWN"]
+        ]
+        for payload in ordinaryPushes {
+            precondition(!Diagnostics.isServicePayload(payload))
+        }
+
+#if canImport(UserNotifications)
+        let service = UNMutableNotificationContent()
+        service.badge = 3
+        service.sound = .default
+        service.categoryIdentifier = "r"
+        Diagnostics.suppressEmptyNotification(service)
+        precondition(service.title == " " && service.body.isEmpty && service.sound == nil)
+        precondition(service.badge == 3 && service.categoryIdentifier.isEmpty)
+        if #available(iOS 15.0, macOS 12.0, *) {
+            precondition(service.interruptionLevel == .passive && service.relevanceScore == 0)
+        }
+        // Sender names, hidden-preview text, calls, and actual new messages retain presentation.
+        for texts in [("Sender", "", "Message"), ("", "", "You have a new message"), ("Caller", "", ""), ("", "Subtitle", "")] {
+            let message = UNMutableNotificationContent()
+            message.title = texts.0
+            message.subtitle = texts.1
+            message.body = texts.2
+            message.sound = .default
+            Diagnostics.suppressEmptyNotification(message)
+            precondition(message.title == texts.0 && message.subtitle == texts.1 && message.body == texts.2)
+            precondition(message.sound != nil)
+        }
+#endif
+
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -28,7 +75,7 @@ struct NotificationDiagnosticsTests {
         var record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
         precondition(record["failure"] as? String == "decryptionFailed")
         precondition(record["phase"] as? String == "delivered")
-        precondition(Set(record.keys).isSubset(of: ["phase", "failure", "timestamp", "usedPayloadFallback", "messageBodyPresent", "privacyHidden"]))
+        precondition(Set(record.keys).isSubset(of: ["phase", "failure", "timestamp", "usedPayloadFallback", "messageBodyPresent", "privacyHidden", "servicePush"]))
         let statusText = String(data: try Data(contentsOf: file), encoding: .utf8)!
         precondition(!statusText.contains("Private message"))
 
@@ -40,6 +87,15 @@ struct NotificationDiagnosticsTests {
         precondition(record["failure"] == nil)
         precondition(record["usedPayloadFallback"] as? Bool == true)
         precondition(record["privacyHidden"] as? Bool == true)
+        Diagnostics.write(.received, to: file)
+        Diagnostics.write(.servicePush, to: file, hasBody: false)
+        Diagnostics.write(.delivered, to: file, hasBody: false)
+        record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        precondition(record["servicePush"] as? Bool == true)
+        precondition(record["messageBodyPresent"] as? Bool == false)
+        Diagnostics.write(.received, to: file)
+        record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        precondition(record["servicePush"] == nil)
         print("Notification payload and diagnostics checks passed")
     }
 }

@@ -1,10 +1,13 @@
 import Foundation
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
 
 public enum AyuNotificationDiagnostics {
     public enum Phase: String, Codable {
         case received, keyMatched, keyNotFound, databaseUnavailable, keyUnavailable
         case decryptionFailed, decrypted, waitingForNetwork, networkTimeout
-        case payloadFallback, delivered, initializationFailed, expired
+        case payloadFallback, delivered, initializationFailed, expired, servicePush
 
         var failure: Bool {
             switch self {
@@ -30,6 +33,7 @@ public enum AyuNotificationDiagnostics {
             case .delivered: return "Уведомление передано iOS"
             case .initializationFailed: return "Не удалось запустить обработчик push"
             case .expired: return "iOS завершила обработчик по тайм-ауту"
+            case .servicePush: return "Служебный push обработан без нового сообщения"
             }
         }
     }
@@ -41,6 +45,7 @@ public enum AyuNotificationDiagnostics {
         var usedPayloadFallback: Bool
         var messageBodyPresent: Bool?
         var privacyHidden: Bool?
+        var servicePush: Bool?
     }
     private static let lock = NSLock()
 
@@ -68,7 +73,9 @@ public enum AyuNotificationDiagnostics {
             state.usedPayloadFallback = false
             state.messageBodyPresent = nil
             state.privacyHidden = nil
+            state.servicePush = nil
         }
+        if phase == .servicePush { state.servicePush = true }
         if phase == .payloadFallback { state.usedPayloadFallback = true }
         if let hasBody { state.messageBodyPresent = hasBody }
         if let privacyHidden { state.privacyHidden = privacyHidden }
@@ -109,6 +116,7 @@ public enum AyuNotificationDiagnostics {
             lines.append("Время: " + DateFormatter.localizedString(from: Date(timeIntervalSince1970: state.timestamp), dateStyle: .short, timeStyle: .medium))
             if let failure = state.failure { lines.append("Последняя ошибка: " + failure.description) }
             if state.usedPayloadFallback { lines.append("Использован резервный текст из push") }
+            if state.servicePush == true { lines.append("Тип push: служебная синхронизация") }
             if let hasBody = state.messageBodyPresent { lines.append("Поле текста: " + (hasBody ? "есть" : "нет")) }
             if let hidden = state.privacyHidden { lines.append("Скрыто блокировкой приложения: " + (hidden ? "да" : "нет")) }
         } else {
@@ -117,6 +125,29 @@ public enum AyuNotificationDiagnostics {
         lines.append("Проверка не записывает сообщения, имена, токены и ключи.")
         return lines.joined(separator: "\n")
     }
+
+    /// Only inspect the authenticated, decrypted payload. The outer APNs alert can be generic.
+    static func isServicePayload(_ payload: [String: Any]) -> Bool {
+        guard let key = payload["loc-key"] as? String else { return false }
+        return ["READ_HISTORY", "READ_REACTION", "READ_STORIES", "MESSAGE_DELETED", "MESSAGE_MUTED", "SESSION_REVOKE"].contains(key)
+    }
+
+#if canImport(UserNotifications)
+    /// Empty service results need explicit passive content on iOS versions that otherwise
+    /// restore the original generic APNs alert. Keep the badge and message content intact.
+    static func suppressEmptyNotification(_ content: UNMutableNotificationContent) {
+        guard content.title.isEmpty, content.subtitle.isEmpty, content.body.isEmpty,
+              content.attachments.isEmpty else { return }
+        content.title = " "
+        content.sound = nil
+        content.categoryIdentifier = ""
+        content.threadIdentifier = "ayu-service-notifications"
+        if #available(iOS 15.0, macOS 12.0, *) {
+            content.interruptionLevel = .passive
+            content.relevanceScore = 0.0
+        }
+    }
+#endif
 
     static func alert(from payload: [String: Any]) -> (title: String?, subtitle: String?, body: String)? {
         guard payload["loc-key"] == nil, payload["story_id"] == nil, payload["call_id"] == nil, payload["encryption_id"] == nil,

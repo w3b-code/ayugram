@@ -22,9 +22,22 @@ def configure(root: Path):
     anchor = '            let _ = (standaloneStateManager(\n'
     fallback = '''            AyuNotificationDiagnostics.record(.keyMatched)
             var payloadFallback: NotificationContent?
+            let decryptedBackupPayload: [String: Any]?
             if let backupNotificationKey,
-               let data = decryptedNotificationPayload(key: backupNotificationKey, data: payloadData),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let data = decryptedNotificationPayload(key: backupNotificationKey, data: payloadData) {
+                decryptedBackupPayload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            } else {
+                decryptedBackupPayload = nil
+            }
+            if let json = decryptedBackupPayload, AyuNotificationDiagnostics.isServicePayload(json) {
+                // Publish a non-alerting result before any account database/network wait.
+                // Continue through the normal actions to update badges and remove read pushes.
+                let serviceContent = NotificationContent(isLockedMessage: nil)
+                payloadFallback = serviceContent
+                updateCurrentContent(serviceContent)
+                AyuNotificationDiagnostics.record(.servicePush, hasBody: false)
+            }
+            if let json = decryptedBackupPayload,
                let alert = AyuNotificationDiagnostics.alert(from: json) {
                 var fallback = NotificationContent(isLockedMessage: isLockedMessage)
                 fallback.title = alert.title
@@ -79,6 +92,17 @@ def configure(root: Path):
     handling = handling.replace('let content = NotificationContent(isLockedMessage: nil)', 'let content = payloadFallback ?? NotificationContent(isLockedMessage: nil)')
     handling = handling.replace('guard let notificationsKey = notificationsKey else {', 'guard let notificationsKey = notificationsKey ?? backupNotificationKey else {')
     source = before+handling+after
+    payload_log = '                    Logger.shared.log("NotificationService \\(episode)", "Decrypted payload: \\(payloadJson)")'
+    source = replace_once(source, payload_log, '''                    if AyuNotificationDiagnostics.isServicePayload(payloadJson) {
+                        updateCurrentContent(NotificationContent(isLockedMessage: nil))
+                        AyuNotificationDiagnostics.record(.servicePush, hasBody: false)
+                    }
+
+''' + payload_log)
+    # As in Swiftgram's legacyNotificationsFix, an empty result must not restore
+    # the original generic APNs text on iOS. This also covers already-read messages.
+    content_end = '        return content\n    }\n}\n\nprivate func getCurrentRenderedTotalUnreadCount'
+    source = replace_once(source, content_end, '        AyuNotificationDiagnostics.suppressEmptyNotification(content)\n' + content_end)
     for message, phase in [
         ("Couldn't find a matching decryption key", 'keyNotFound'),
         ("Didn't receive stateManager", 'databaseUnavailable'),
