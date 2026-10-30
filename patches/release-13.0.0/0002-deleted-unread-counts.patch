@@ -1,0 +1,485 @@
+diff --git a/submodules/Postbox/Sources/Message.swift b/submodules/Postbox/Sources/Message.swift
+index a3a0bd7..644f420 100644
+--- a/submodules/Postbox/Sources/Message.swift
++++ b/submodules/Postbox/Sources/Message.swift
+@@ -481,6 +481,9 @@ public struct MessageFlags: OptionSet {
+             rawValue |= MessageFlags.ReactionsArePossible.rawValue
+         }
+         
++        if flags.contains(.ExcludedFromUnreadCount) {
++            rawValue |= MessageFlags.ExcludedFromUnreadCount.rawValue
++        }
+         self.rawValue = rawValue
+     }
+     
+@@ -495,8 +498,13 @@ public struct MessageFlags: OptionSet {
+     public static let CopyProtected = MessageFlags(rawValue: 512)
+     public static let IsForumTopic = MessageFlags(rawValue: 1024)
+     public static let ReactionsArePossible = MessageFlags(rawValue: 2048)
++    public static let ExcludedFromUnreadCount = MessageFlags(rawValue: 4096)
+     
+     public static let IsIncomingMask = MessageFlags([.Incoming, .CountedAsIncoming])
++
++    public var isIncomingForUnreadCount: Bool {
++        return !self.intersection(.IsIncomingMask).isEmpty && !self.contains(.ExcludedFromUnreadCount)
++    }
+ }
+ 
+ public struct StoreMessageForwardInfo {
+@@ -613,6 +621,7 @@ public struct StoryId: Codable, Hashable {
+ }
+ 
+ public protocol MessageAttribute: AnyObject, PostboxCoding {
++    var excludesFromUnreadCount: Bool { get }
+     var associatedPeerIds: [PeerId] { get }
+     var associatedMessageIds: [MessageId] { get }
+     var associatedMediaIds: [MediaId] { get }
+@@ -621,6 +630,8 @@ public protocol MessageAttribute: AnyObject, PostboxCoding {
+ }
+ 
+ public extension MessageAttribute {
++    var excludesFromUnreadCount: Bool { return false }
++
+     var associatedPeerIds: [PeerId] {
+         return []
+     }
+@@ -868,6 +879,9 @@ public struct StoreMessageFlags: OptionSet {
+             rawValue |= StoreMessageFlags.ReactionsArePossible.rawValue
+         }
+         
++        if flags.contains(.ExcludedFromUnreadCount) {
++            rawValue |= StoreMessageFlags.ExcludedFromUnreadCount.rawValue
++        }
+         self.rawValue = rawValue
+     }
+     
+@@ -882,6 +896,7 @@ public struct StoreMessageFlags: OptionSet {
+     public static let CopyProtected = StoreMessageFlags(rawValue: 512)
+     public static let IsForumTopic = StoreMessageFlags(rawValue: 1024)
+     public static let ReactionsArePossible = StoreMessageFlags(rawValue: 2048)
++    public static let ExcludedFromUnreadCount = StoreMessageFlags(rawValue: 4096)
+     
+     public static let IsIncomingMask = StoreMessageFlags([.Incoming, .CountedAsIncoming])
+ }
+diff --git a/submodules/Postbox/Sources/MessageHistoryIndexTable.swift b/submodules/Postbox/Sources/MessageHistoryIndexTable.swift
+index 8d3b262..b38e3f5 100644
+--- a/submodules/Postbox/Sources/MessageHistoryIndexTable.swift
++++ b/submodules/Postbox/Sources/MessageHistoryIndexTable.swift
+@@ -175,7 +175,7 @@ final class MessageHistoryIndexTable: Table {
+         
+         let value = WriteBuffer()
+         var flags: Int8 = HistoryEntryTypeMessage
+-        if !message.flags.intersection(.IsIncomingMask).isEmpty {
++        if !message.flags.intersection(.IsIncomingMask).isEmpty && !message.flags.contains(.ExcludedFromUnreadCount) && !message.attributes.contains(where: { $0.excludesFromUnreadCount }) {
+             flags |= HistoryEntryMessageFlagIncoming
+         }
+         var timestamp: Int32 = index.timestamp
+@@ -221,6 +221,20 @@ final class MessageHistoryIndexTable: Table {
+         return self.valueBox.exists(self.table, key: self.key(id))
+     }
+     
++    func updateIncomingForUnreadCount(_ id: MessageId, incoming: Bool) {
++        let key = self.key(id)
++        guard let value = self.valueBox.get(self.table, key: key) else { return }
++        var flags: Int8 = 0
++        value.read(&flags, offset: 0, length: 1)
++        let updated = incoming ? (flags | HistoryEntryMessageFlagIncoming) : (flags & ~HistoryEntryMessageFlagIncoming)
++        guard flags != updated else { return }
++        flags = updated
++        let buffer = WriteBuffer()
++        buffer.write(&flags, offset: 0, length: 1)
++        buffer.write(value.memory.advanced(by: 1), offset: 0, length: value.length - 1)
++        self.valueBox.set(self.table, key: key, value: buffer)
++    }
++
+     func incomingMessageCountInRange(_ peerId: PeerId, namespace: MessageId.Namespace, minId: MessageId.Id, maxId: MessageId.Id) -> (Int, Bool) {
+         var count = 0
+         var holes = false
+diff --git a/submodules/Postbox/Sources/MessageHistoryTable.swift b/submodules/Postbox/Sources/MessageHistoryTable.swift
+index bbb1f8c..a96e347 100644
+--- a/submodules/Postbox/Sources/MessageHistoryTable.swift
++++ b/submodules/Postbox/Sources/MessageHistoryTable.swift
+@@ -231,6 +231,27 @@ final class MessageHistoryTable: Table {
+         }
+     }
+     
++    private func applyUnreadExclusionIfNeeded(index: MessageIndex, message: InternalStoreMessage, updatedCombinedState: inout CombinedPeerReadState?, invalidateReadState: inout Bool) {
++        guard self.seedConfiguration.chatMessagesNamespaces.contains(index.id.namespace),
++              let previous = self.getMessage(index), previous.flags.isIncomingForUnreadCount,
++              message.flags.contains(.ExcludedFromUnreadCount)
++                || message.attributes.contains(where: { $0.excludesFromUnreadCount })
++                || MessageHistoryTable.renderMessageAttributes(previous).contains(where: { $0.excludesFromUnreadCount }) else {
++            return
++        }
++        // A legacy archive may already be absent from the server's count; migration validates it.
++        if MessageHistoryTable.renderMessageAttributes(previous).contains(where: { $0.excludesFromUnreadCount }) {
++            return
++        }
++        let (combined, invalidated) = self.readStateTable.deleteMessages(index.id.peerId, indices: [index], incomingStatsInIndices: { peerId, namespace, indices in
++            return self.incomingMessageStatsInIndices(peerId, namespace: namespace, indices: indices)
++        })
++        if let combined {
++            updatedCombinedState = combined
++        }
++        invalidateReadState = invalidateReadState || invalidated
++    }
++
+     private func processIndexOperations(_ peerId: PeerId, operations: [MessageHistoryIndexOperation], processedOperationsByPeerId: inout [PeerId: [MessageHistoryOperation]], updatedMedia: inout [MediaId: Media?], unsentMessageOperations: inout [IntermediateMessageHistoryUnsentOperation], updatedPeerReadStateOperations: inout [PeerId: PeerReadStateSynchronizationOperation?], globalTagsOperations: inout [GlobalMessageHistoryTagsOperation], pendingActionsOperations: inout [PendingMessageActionsOperation], updatedMessageActionsSummaries: inout [PendingMessageActionsSummaryKey: Int32], updatedMessageTagSummaries: inout [MessageHistoryTagsSummaryKey: MessageHistoryTagNamespaceSummary], invalidateMessageTagSummaries: inout [InvalidatedMessageHistoryTagsSummaryEntryOperation], localTagsOperations: inout [IntermediateMessageHistoryLocalTagsOperation], timestampBasedMessageAttributesOperations: inout [TimestampBasedMessageAttributesOperation]) {
+         let sharedKey = self.key(MessageIndex(id: MessageId(peerId: PeerId(0), namespace: 0, id: 0), timestamp: 0))
+         let sharedBuffer = WriteBuffer()
+@@ -347,7 +368,7 @@ final class MessageHistoryTable: Table {
+                             self.timeBasedAttributesTable.set(tag: tag, id: message.id, timestamp: timestamp, operations: &timestampBasedMessageAttributesOperations)
+                         }
+                     }
+-                    if self.seedConfiguration.chatMessagesNamespaces.contains(message.id.namespace) && !message.flags.intersection(.IsIncomingMask).isEmpty {
++                    if self.seedConfiguration.chatMessagesNamespaces.contains(message.id.namespace) && message.flags.isIncomingForUnreadCount {
+                         accumulatedAddedIncomingMessageIndices.insert(message.index)
+                     }
+                 case let .InsertExistingMessage(storeMessage):
+@@ -355,6 +376,7 @@ final class MessageHistoryTable: Table {
+                     processIndexOperationsCommitAccumulatedRemoveIndices(peerId: peerId, accumulatedRemoveIndices: &accumulatedRemoveIndices, updatedCombinedState: &updatedCombinedState, invalidateReadState: &invalidateReadState, unsentMessageOperations: &unsentMessageOperations, outputOperations: &outputOperations, globalTagsOperations: &globalTagsOperations, pendingActionsOperations: &pendingActionsOperations, updatedMessageActionsSummaries: &updatedMessageActionsSummaries, updatedMessageTagSummaries: &updatedMessageTagSummaries, invalidateMessageTagSummaries: &invalidateMessageTagSummaries, localTagsOperations: &localTagsOperations, timestampBasedMessageAttributesOperations: &timestampBasedMessageAttributesOperations)
+                     
+                     var updatedGroupInfos: [MessageId: MessageGroupInfo] = [:]
++                    self.applyUnreadExclusionIfNeeded(index: storeMessage.index, message: storeMessage, updatedCombinedState: &updatedCombinedState, invalidateReadState: &invalidateReadState)
+                     if let (message, previousTags, previousThreadId) = self.justUpdate(storeMessage.index, message: storeMessage, keepLocalTags: true, sharedKey: sharedKey, sharedBuffer: sharedBuffer, sharedEncoder: sharedEncoder, unsentMessageOperations: &unsentMessageOperations, updatedMessageTagSummaries: &updatedMessageTagSummaries, invalidateMessageTagSummaries: &invalidateMessageTagSummaries, updatedGroupInfos: &updatedGroupInfos, localTagsOperations: &localTagsOperations, timestampBasedMessageAttributesOperations: &timestampBasedMessageAttributesOperations, updatedMedia: &updatedMedia, globalTagsOperations: &globalTagsOperations) {
+                         outputOperations.append(.Remove([(storeMessage.index, previousTags, previousThreadId)]))
+                         outputOperations.append(.InsertMessage(message))
+@@ -370,6 +392,7 @@ final class MessageHistoryTable: Table {
+                     processIndexOperationsCommitAccumulatedRemoveIndices(peerId: peerId, accumulatedRemoveIndices: &accumulatedRemoveIndices, updatedCombinedState: &updatedCombinedState, invalidateReadState: &invalidateReadState, unsentMessageOperations: &unsentMessageOperations, outputOperations: &outputOperations, globalTagsOperations: &globalTagsOperations, pendingActionsOperations: &pendingActionsOperations, updatedMessageActionsSummaries: &updatedMessageActionsSummaries, updatedMessageTagSummaries: &updatedMessageTagSummaries, invalidateMessageTagSummaries: &invalidateMessageTagSummaries, localTagsOperations: &localTagsOperations, timestampBasedMessageAttributesOperations: &timestampBasedMessageAttributesOperations)
+                     
+                     var updatedGroupInfos: [MessageId: MessageGroupInfo] = [:]
++                    self.applyUnreadExclusionIfNeeded(index: index, message: storeMessage, updatedCombinedState: &updatedCombinedState, invalidateReadState: &invalidateReadState)
+                     if let (message, previousTags, previousThreadId) = self.justUpdate(index, message: storeMessage, keepLocalTags: false, sharedKey: sharedKey, sharedBuffer: sharedBuffer, sharedEncoder: sharedEncoder, unsentMessageOperations: &unsentMessageOperations, updatedMessageTagSummaries: &updatedMessageTagSummaries, invalidateMessageTagSummaries: &invalidateMessageTagSummaries, updatedGroupInfos: &updatedGroupInfos, localTagsOperations: &localTagsOperations, timestampBasedMessageAttributesOperations: &timestampBasedMessageAttributesOperations, updatedMedia: &updatedMedia, globalTagsOperations: &globalTagsOperations) {
+                         outputOperations.append(.Remove([(index, previousTags, previousThreadId)]))
+                         outputOperations.append(.InsertMessage(message))
+@@ -377,7 +400,7 @@ final class MessageHistoryTable: Table {
+                             outputOperations.append(.UpdateGroupInfos(updatedGroupInfos))
+                         }
+                         
+-                        if self.seedConfiguration.chatMessagesNamespaces.contains(message.id.namespace) && !message.flags.intersection(.IsIncomingMask).isEmpty {
++                        if self.seedConfiguration.chatMessagesNamespaces.contains(message.id.namespace) && message.flags.isIncomingForUnreadCount {
+                             if index != message.index {
+                                 accumulatedRemoveIndices.append(index)
+                                 accumulatedAddedIncomingMessageIndices.insert(message.index)
+@@ -1145,6 +1168,9 @@ final class MessageHistoryTable: Table {
+         }
+         
+         var flags = MessageFlags(message.flags)
++        if message.attributes.contains(where: { $0.excludesFromUnreadCount }) {
++            flags.insert(.ExcludedFromUnreadCount)
++        }
+         sharedBuffer.write(&flags.rawValue, offset: 0, length: 4)
+         
+         var tags = message.tags
+@@ -1889,6 +1915,10 @@ final class MessageHistoryTable: Table {
+             }
+             
+             var flags = MessageFlags(message.flags)
++            if previousMessage.flags.contains(.ExcludedFromUnreadCount) || updatedAttributes.contains(where: { $0.excludesFromUnreadCount }) {
++                flags.insert(.ExcludedFromUnreadCount)
++            }
++            self.messageHistoryIndexTable.updateIncomingForUnreadCount(message.id, incoming: flags.isIncomingForUnreadCount)
+             sharedBuffer.write(&flags.rawValue, offset: 0, length: 4)
+             
+             var tags = message.tags
+@@ -3055,7 +3085,7 @@ final class MessageHistoryTable: Table {
+             let key = self.key(index)
+             if let value = self.valueBox.get(self.table, key: key) {
+                 let entry = self.readIntermediateEntry(key, value: value)
+-                if entry.message.id.namespace == namespace && !entry.message.flags.intersection(.IsIncomingMask).isEmpty {
++                if entry.message.id.namespace == namespace && entry.message.flags.isIncomingForUnreadCount {
+                     count += 1
+                 }
+             } else {
+@@ -3077,7 +3107,7 @@ final class MessageHistoryTable: Table {
+         if fromIndex <= toIndex {
+             self.valueBox.range(self.table, start: self.key(fromIndex).predecessor, end: self.key(toIndex).successor, values: { key, value in
+                 let entry = self.readIntermediateEntry(key, value: value)
+-                if entry.message.id.namespace == namespace && !entry.message.flags.intersection(.IsIncomingMask).isEmpty {
++                if entry.message.id.namespace == namespace && entry.message.flags.isIncomingForUnreadCount {
+                     count += 1
+                     messageIds.append(entry.message.id)
+                 }
+diff --git a/submodules/Postbox/Sources/Postbox.swift b/submodules/Postbox/Sources/Postbox.swift
+index 5fdf8a8..0ad5a80 100644
+--- a/submodules/Postbox/Sources/Postbox.swift
++++ b/submodules/Postbox/Sources/Postbox.swift
+@@ -211,9 +211,9 @@ public final class Transaction {
+         self.postbox?.resetIncomingReadStates(states)
+     }
+     
+-    public func setNeedsIncomingReadStateSynchronization(_ peerId: PeerId) {
++    public func setNeedsIncomingReadStateSynchronization(_ peerId: PeerId, preservePendingPush: Bool = false) {
+         assert(!self.disposed)
+-        self.postbox?.setNeedsIncomingReadStateSynchronization(peerId)
++        self.postbox?.setNeedsIncomingReadStateSynchronization(peerId, preservePendingPush: preservePendingPush)
+     }
+     
+     public func confirmSynchronizedIncomingReadState(_ peerId: PeerId) {
+@@ -2352,8 +2352,15 @@ final class PostboxImpl {
+         self.messageHistoryTable.resetIncomingReadStates(states, operationsByPeerId: &self.currentOperationsByPeerId, updatedPeerReadStateOperations: &self.currentUpdatedSynchronizeReadStateOperations)
+     }
+     
+-    fileprivate func setNeedsIncomingReadStateSynchronization(_ peerId: PeerId) {
+-        self.synchronizeReadStateTable.set(peerId, operation: .Validate, operations: &self.currentUpdatedSynchronizeReadStateOperations)
++    fileprivate func setNeedsIncomingReadStateSynchronization(_ peerId: PeerId, preservePendingPush: Bool) {
++        var operation: PeerReadStateSynchronizationOperation = .Validate
++        if preservePendingPush {
++            let pending = self.synchronizeReadStateTable.get(getCombinedPeerReadState: { self.readStateTable.getCombinedState($0) })
++            if case let .Push(state, _)? = pending[peerId] {
++                operation = .Push(state: state, thenSync: true)
++            }
++        }
++        self.synchronizeReadStateTable.set(peerId, operation: operation, operations: &self.currentUpdatedSynchronizeReadStateOperations)
+     }
+     
+     fileprivate func confirmSynchronizedIncomingReadState(_ peerId: PeerId) {
+diff --git a/submodules/Postbox/Tests/ExcludedUnreadMessageTests.swift b/submodules/Postbox/Tests/ExcludedUnreadMessageTests.swift
+new file mode 100644
+index 0000000..32cab64
+--- /dev/null
++++ b/submodules/Postbox/Tests/ExcludedUnreadMessageTests.swift
+@@ -0,0 +1,158 @@
++import Foundation
++import XCTest
++import SwiftSignalKit
++@testable import Postbox
++
++private final class ArchivedUnreadFixtureAttribute: MessageAttribute {
++    static let register: Void = {
++        declareEncodable(ArchivedUnreadFixtureAttribute.self, f: { ArchivedUnreadFixtureAttribute(decoder: $0) })
++    }()
++    var excludesFromUnreadCount: Bool { return true }
++    init() {}
++    init(decoder: PostboxDecoder) {}
++    func encode(_ encoder: PostboxEncoder) {}
++}
++
++final class ExcludedUnreadMessageTests: XCTestCase {
++    private var fixture: PostboxFixture!
++    private let chat = MessageHistoryTableFixture.peerId(980)
++    private let other = MessageHistoryTableFixture.peerId(981)
++    private let namespace = PostboxFixture.messageNamespace
++
++    override func setUp() {
++        super.setUp()
++        let _ = ArchivedUnreadFixtureAttribute.register
++        self.fixture = PostboxFixture(name: "ExcludedUnreadMessageTests")
++    }
++
++    override func tearDown() {
++        self.fixture.close()
++        self.fixture = nil
++        super.tearDown()
++    }
++
++    private func id(_ value: Int32) -> MessageId {
++        return MessageId(peerId: self.chat, namespace: self.namespace, id: value)
++    }
++
++    private func message(_ value: Int32, archived: Bool = false) -> StoreMessage {
++        return MessageHistoryTableFixture.storeMessage(id: self.id(value), timestamp: 2000 + value, text: "m\(value)", flags: [.Incoming, .TopIndexable])
++            .withUpdatedAttributes(archived ? [ArchivedUnreadFixtureAttribute()] : [])
++    }
++
++    private func seed(count: Int32 = 2, readUpTo: Int32 = 0, unread: Int32? = nil) {
++        self.fixture.transaction { transaction in
++            transaction.updatePeersInternal([FixturePeer(id: self.chat, title: "Latest"), FixturePeer(id: self.other, title: "Other")], update: { _, updated in updated })
++            for peer in [self.chat, self.other] {
++                transaction.updatePeerChatListInclusion(peer, inclusion: .ifHasMessagesOrOneOf(groupId: .root, pinningIndex: nil, minTimestamp: nil))
++            }
++            let otherMessage = MessageHistoryTableFixture.storeMessage(id: MessageId(peerId: self.other, namespace: self.namespace, id: 1), timestamp: 1500, text: "older", flags: [.Incoming, .TopIndexable])
++            let _ = transaction.addMessages([otherMessage] + (1...count).map { self.message($0) }, location: .Random)
++            transaction.resetIncomingReadStates([self.chat: [self.namespace: .idBased(maxIncomingReadId: readUpTo, maxOutgoingReadId: 0, maxKnownId: count, count: unread ?? (count - readUpTo), markedUnread: false)]])
++        }
++    }
++
++    private func archive(_ value: Int32) {
++        self.fixture.transaction { transaction in
++            transaction.updateMessage(self.id(value), update: { _ in .update(self.message(value, archived: true)) })
++        }
++    }
++
++    private func unreadCount() -> Int32? {
++        return self.fixture.transaction { $0.getCombinedPeerReadState(self.chat)?.count } ?? nil
++    }
++
++    func testDeletingLatestKeepsChatAtItsPositionWithoutItsUnreadCounter() {
++        self.seed(count: 1)
++        let before = self.fixture.transaction { $0.getPeerChatListIndex(self.chat)?.1 } ?? nil
++        let rows = self.fixture.observe(self.fixture.postbox.tailChatListView(groupId: .root, filterPredicate: nil, count: 10, summaryComponents: ChatListEntrySummaryComponents()) |> map { $0.0 })
++        rows.waitForValues(count: 1)
++        self.archive(1)
++        XCTAssertEqual(self.unreadCount(), 0)
++        XCTAssertEqual(self.fixture.transaction { $0.getPeerChatListIndex(self.chat)?.1 } ?? nil, before)
++        let view = rows.waitForValues(count: 2).last
++        let order = (view?.entries ?? []).compactMap { entry -> PeerId? in
++            if case let .MessageEntry(data) = entry { return data.index.messageIndex.id.peerId }
++            return nil
++        }
++        XCTAssertEqual(order, [self.other, self.chat])
++        let message = self.fixture.transaction { $0.getMessage(self.id(1)) } ?? nil
++        XCTAssertEqual(message?.text, "m1")
++        XCTAssertTrue(message?.flags.contains(.Incoming) == true)
++        XCTAssertTrue(message?.flags.contains(.TopIndexable) == true)
++        XCTAssertTrue(message?.flags.contains(.ExcludedFromUnreadCount) == true)
++        let state = self.fixture.transaction { $0.getPeerReadStates(self.chat)?.first?.1 } ?? nil
++        if case let .idBased(maxRead, _, _, _, _)? = state {
++            XCTAssertEqual(maxRead, 0, "archiving must not mark any message read")
++        } else { XCTFail("missing read state") }
++    }
++
++    func testOtherUnreadMessagesRemainAndRepeatedDeletionDoesNotSubtractTwice() {
++        self.seed(count: 3)
++        self.archive(2)
++        XCTAssertEqual(self.unreadCount(), 2)
++        self.archive(2)
++        XCTAssertEqual(self.unreadCount(), 2)
++        self.fixture.transaction { $0.applyIncomingReadMaxId(self.id(1)) }
++        XCTAssertEqual(self.unreadCount(), 1)
++        self.fixture.transaction { $0.applyIncomingReadMaxId(self.id(3)) }
++        XCTAssertEqual(self.unreadCount(), 0)
++    }
++
++    func testDeletingReadMessageDoesNotRemoveGenuineUnread() {
++        self.seed(count: 2, readUpTo: 1, unread: 1)
++        self.archive(1)
++        XCTAssertEqual(self.unreadCount(), 1)
++    }
++
++    func testServerRefreshCannotRestoreArchivedMessageToUnreadCount() {
++        self.seed()
++        self.archive(2)
++        self.fixture.transaction { transaction in
++            transaction.updateMessage(self.id(2), update: { _ in .update(self.message(2)) })
++        }
++        XCTAssertEqual(self.unreadCount(), 1)
++        let message = self.fixture.transaction { $0.getMessage(self.id(2)) } ?? nil
++        XCTAssertTrue(message?.flags.contains(.ExcludedFromUnreadCount) == true)
++        self.fixture.transaction { $0.applyIncomingReadMaxId(self.id(1)) }
++        XCTAssertEqual(self.unreadCount(), 0)
++    }
++
++    func testRemovingArchivedHistoryDoesNotSubtractAnotherUnreadMessage() {
++        self.seed()
++        self.archive(2)
++        self.fixture.transaction { $0.deleteMessages([self.id(2)], forEachMedia: { _ in }) }
++        XCTAssertEqual(self.unreadCount(), 1)
++    }
++
++    func testFlagRoundtripKeepsIncomingDirectionAndTopIndex() {
++        let original: StoreMessageFlags = [.Incoming, .TopIndexable, .ExcludedFromUnreadCount]
++        XCTAssertEqual(StoreMessageFlags(MessageFlags(original)), original)
++        XCTAssertFalse(MessageFlags(original).isIncomingForUnreadCount)
++        XCTAssertTrue(MessageFlags([.Incoming, .TopIndexable]).isIncomingForUnreadCount)
++    }
++
++    func testAnArchivedMessageInsertedFromHistoryDoesNotIncreaseUnreadCount() {
++        self.seed(count: 1)
++        self.fixture.transaction { transaction in
++            let _ = transaction.addMessages([self.message(2, archived: true)], location: .UpperHistoryBlock)
++        }
++        XCTAssertEqual(self.unreadCount(), 1)
++        self.fixture.transaction { $0.applyIncomingReadMaxId(self.id(1)) }
++        XCTAssertEqual(self.unreadCount(), 0)
++    }
++
++    func testLegacyValidationPreservesAReadPushAlreadyRequestedByTheUser() {
++        self.seed()
++        let operations = self.fixture.observe(self.fixture.postbox.synchronizePeerReadStatesView() |> map { $0.operations })
++        operations.waitForValues(count: 1)
++        self.fixture.transaction { transaction in
++            let _ = transaction.applyInteractiveReadMaxIndex(MessageIndex(id: self.id(1), timestamp: 2001))
++            transaction.setNeedsIncomingReadStateSynchronization(self.chat, preservePendingPush: true)
++        }
++        let latest = operations.waitForValues(count: 2).last
++        if case let .Push(_, thenSync)? = latest?[self.chat] {
++            XCTAssertTrue(thenSync)
++        } else { XCTFail("pending user read push was discarded") }
++    }
++}
+diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+index 80b1a42..c1f0add 100644
+--- a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
++++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+@@ -9,6 +9,7 @@ internal import TelegramApi
+ /// Kept across later updates of the message by `mergeMessageAttributes`.
+ public final class AyuDeletedMessageAttribute: MessageAttribute {
+     public let deletedAt: Int32
++    public var excludesFromUnreadCount: Bool { return true }
+ 
+     public init(deletedAt: Int32) {
+         self.deletedAt = deletedAt
+@@ -100,18 +101,26 @@ func ayuMarkMessagesDeleted(transaction: Transaction, ids: [MessageId]) -> [Mess
+             remaining.append(id)
+             continue
+         }
+-        if message.ayuDeletedAttribute != nil {
++        let wasDeleted = message.ayuDeletedAttribute != nil
++        if wasDeleted && message.flags.contains(.ExcludedFromUnreadCount) {
+             continue
+         }
+         transaction.updateMessage(id, update: { current in
+             var attributes = current.attributes
+-            attributes.append(AyuDeletedMessageAttribute(deletedAt: timestamp))
++            if !wasDeleted {
++                attributes.append(AyuDeletedMessageAttribute(deletedAt: timestamp))
++            }
++            var tags = current.tags
++            tags.remove(.unseenPersonalMessage)
++            tags.remove(.unseenReaction)
+             let storeForwardInfo = current.forwardInfo.flatMap { forwardInfo in
+                 StoreMessageForwardInfo(authorId: forwardInfo.author?.id, sourceId: forwardInfo.source?.id, sourceMessageId: forwardInfo.sourceMessageId, date: forwardInfo.date, authorSignature: forwardInfo.authorSignature, psaType: forwardInfo.psaType, flags: forwardInfo.flags)
+             }
+-            return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: current.tags, globalTags: current.globalTags, localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: attributes, media: current.media))
++            return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: tags, globalTags: current.globalTags, localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: attributes, media: current.media))
+         })
+-        marked.append(id)
++        if !wasDeleted {
++            marked.append(id)
++        }
+     }
+     return remaining
+ }
+@@ -377,3 +386,28 @@ func ayuManagedAutoOffline(postbox: Postbox, network: Network, accountPeerId: Pe
+     return combineLatest(localPresence |> then(.never()), sendOffline |> then(.never()))
+     |> ignoreValues
+ }
++
++private struct AyuUnreadRepairState: Codable {
++    let completed: Bool
++}
++
++func ayuRepairDeletedMessageUnreadCounts(transaction: Transaction) {
++    let key = ValueBoxKey(length: 8)
++    key.setInt64(0, value: 0x617975756e726431)
++    if transaction.getPreferencesEntry(key: key)?.get(AyuUnreadRepairState.self)?.completed == true {
++        return
++    }
++    let index = transaction.getPreferencesEntry(key: ayuDeletedMessagesIndexKey)?.get(AyuDeletedMessagesIndex.self)
++    let ids = (index?.items ?? []).compactMap { item -> MessageId? in
++        let id = MessageId(peerId: PeerId(item.peerId), namespace: item.namespace, id: item.id)
++        guard let message = transaction.getMessage(id), message.ayuDeletedAttribute != nil, !message.flags.contains(.ExcludedFromUnreadCount) else {
++            return nil
++        }
++        return id
++    }
++    let _ = ayuMarkMessagesDeleted(transaction: transaction, ids: ids)
++    for peerId in Set(ids.map { $0.peerId }) {
++        transaction.setNeedsIncomingReadStateSynchronization(peerId, preservePendingPush: true)
++    }
++    transaction.updatePreferencesEntry(key: key, { _ in PreferencesEntry(AyuUnreadRepairState(completed: true)) })
++}
+diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+index a1372c5..8346bb8 100644
+--- a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
++++ b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+@@ -4119,6 +4119,8 @@ func replayFinalState(
+         }
+     }
+     
++    ayuRepairDeletedMessageUnreadCounts(transaction: transaction)
++
+     var peerIdsWithAddedSecretMessages = Set<PeerId>()
+     
+     var updatedTypingActivities: [PeerActivitySpace: [PeerId: PeerInputActivity?]] = [:]
