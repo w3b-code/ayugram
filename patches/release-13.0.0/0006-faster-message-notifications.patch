@@ -1,0 +1,30 @@
+diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+index 3e47996..2b7ed54 100644
+--- a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
++++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+@@ -226,6 +226,25 @@ public func ayuDeletedMessages(account: Account, peerId: EnginePeer.Id, since: I
+     }
+ }
+ 
++/// Save the exact message before displaying its push without waiting for a complete
++/// getDifference/getChannelDifference cycle. Retains the normal server-message parser,
++/// attribute merge and media references, so subsequent deletions can still be archived.
++public func ayuLoadNotificationMessage(postbox: Postbox, network: Network, accountPeerId: PeerId, id: MessageId) -> Signal<Bool, NoError> {
++    return (_internal_getMessagesLoadIfNecessary([id], postbox: postbox, network: network, accountPeerId: accountPeerId)
++    |> `catch` { _ -> Signal<GetMessagesResult, NoError> in
++        return .single(.result([]))
++    })
++    |> mapToSignal { result -> Signal<Bool, NoError> in
++        switch result {
++        case .progress:
++            return .complete()
++        case let .result(messages):
++            return .single(messages.contains(where: { $0.id == id }))
++        }
++    }
++    |> take(1)
++}
++
+ /// Deletes messages for a MESSAGE_DELETED push in the notification extension, which shares the
+ /// app's database: the saved ones are marked deleted, as when the app itself gets the deletion.
+ public func ayuDeleteMessagesFromPush(transaction: Transaction, mediaBox: MediaBox, ids: [MessageId]) {
