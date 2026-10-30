@@ -25,3 +25,7 @@ jobs:
         run: |
           swiftc -warnings-as-errors runtime/AyuNotificationDiagnostics.swift tests/NotificationDiagnosticsTests.swift -o "$RUNNER_TEMP/notification-tests"
           "$RUNNER_TEMP/notification-tests"
+      - name: Test saved message retention during remote history validation
+        run: |
+          swiftc -warnings-as-errors runtime/AyuHistoryRetention.swift tests/HistoryRetentionTests.swift -o "$RUNNER_TEMP/history-retention-tests"
+          "$RUNNER_TEMP/history-retention-tests"
