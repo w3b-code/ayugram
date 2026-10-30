@@ -23,8 +23,12 @@ jobs:
           "$RUNNER_TEMP/app-group-tests"
       - name: Test notification payload fallback and safe diagnostics
         run: |
-          swiftc -warnings-as-errors runtime/AyuNotificationDiagnostics.swift tests/NotificationDiagnosticsTests.swift -o "$RUNNER_TEMP/notification-tests"
+          swiftc -warnings-as-errors runtime/AyuAppGroupResolver.swift runtime/AyuNotificationDiagnostics.swift tests/NotificationDiagnosticsTests.swift -o "$RUNNER_TEMP/notification-tests"
           "$RUNNER_TEMP/notification-tests"
+      - name: Test signed App Group resolution
+        run: |
+          swiftc -warnings-as-errors runtime/AyuAppGroupResolver.swift tests/AppGroupResolverTests.swift -o "$RUNNER_TEMP/group-resolver-tests"
+          "$RUNNER_TEMP/group-resolver-tests"
       - name: Test saved message retention during remote history validation
         run: |
           swiftc -warnings-as-errors runtime/AyuHistoryRetention.swift tests/HistoryRetentionTests.swift -o "$RUNNER_TEMP/history-retention-tests"
