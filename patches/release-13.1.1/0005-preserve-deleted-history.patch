@@ -1,0 +1,64 @@
+diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+index c710605..3e47996 100644
+--- a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
++++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+@@ -229,11 +229,20 @@ public func ayuDeletedMessages(account: Account, peerId: EnginePeer.Id, since: I
+ /// Deletes messages for a MESSAGE_DELETED push in the notification extension, which shares the
+ /// app's database: the saved ones are marked deleted, as when the app itself gets the deletion.
+ public func ayuDeleteMessagesFromPush(transaction: Transaction, mediaBox: MediaBox, ids: [MessageId]) {
+-    var ids = ids
+-    if AyuSettings.shared.values.saveDeletedMessages {
+-        ids = ayuMarkMessagesDeleted(transaction: transaction, ids: ids)
+-    }
+-    _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, deleteMedia: true)
++    ayuDeleteMessagesFromHistoryValidation(transaction: transaction, mediaBox: mediaBox, ids: ids)
++}
++
++/// A remote refresh/deletion cannot erase an already saved local archive, even if
++/// saving NEW deletions has since been switched off. Explicit user deletion uses
++/// _internal_deleteMessages directly and still removes the archive normally.
++func ayuDeleteMessagesFromHistoryValidation(transaction: Transaction, mediaBox: MediaBox, ids: [MessageId]) {
++    AyuHistoryRetention.apply(ids: ids, savingEnabled: AyuSettings.shared.values.saveDeletedMessages, isSaved: { id in
++        return transaction.getMessage(id)?.ayuDeletedAttribute != nil
++    }, save: { ids in
++        return ayuMarkMessagesDeleted(transaction: transaction, ids: ids)
++    }, remove: { ids in
++        _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, deleteMedia: true)
++    })
+ }
+ 
+ /// The edit history after `previous` is replaced by `updated`, or nil when the text did not change.
+diff --git a/submodules/TelegramCore/Sources/State/HistoryViewStateValidation.swift b/submodules/TelegramCore/Sources/State/HistoryViewStateValidation.swift
+index 1d03db5..eda9b33 100644
+--- a/submodules/TelegramCore/Sources/State/HistoryViewStateValidation.swift
++++ b/submodules/TelegramCore/Sources/State/HistoryViewStateValidation.swift
+@@ -43,6 +43,11 @@ private enum HistoryState {
+     }
+     
+     func isMessageValid(_ message: Message) -> Bool {
++        // A saved local deletion is intentionally absent from the server's history.
++        // It must not be invalidated again every time the user navigates to it.
++        if message.ayuDeletedAttribute != nil {
++            return true
++        }
+         switch self {
+         case let .channel(_, state):
+             if let invalidatedPts = state.invalidatedPts {
+@@ -992,7 +997,7 @@ private func validateBatch(postbox: Postbox, network: Network, transaction: Tran
+                                         return .update(StoreMessage(id: currentMessage.id, customStableId: nil, globallyUniqueId: currentMessage.globallyUniqueId, groupingKey: currentMessage.groupingKey, threadId: currentMessage.threadId, timestamp: currentMessage.timestamp, flags: StoreMessageFlags(currentMessage.flags), tags: updatedTags, globalTags: currentMessage.globalTags, localTags: currentMessage.localTags, forwardInfo: storeForwardInfo, authorId: currentMessage.author?.id, text: currentMessage.text, attributes: attributes, media: currentMessage.media))
+                                     })
+                                 } else {
+-                                    _internal_deleteMessages(transaction: transaction, mediaBox: postbox.mediaBox, ids: [id])
++                                    ayuDeleteMessagesFromHistoryValidation(transaction: transaction, mediaBox: postbox.mediaBox, ids: [id])
+                                     Logger.shared.log("HistoryValidation", "deleting message \(id) in \(id.peerId)")
+                                 }
+                             }
+@@ -1175,7 +1180,7 @@ private func validateReplyThreadBatch(postbox: Postbox, network: Network, transa
+                 
+                     for id in removedMessageIds {
+                         if !validMessageIds.contains(id) {
+-                            _internal_deleteMessages(transaction: transaction, mediaBox: postbox.mediaBox, ids: [id])
++                            ayuDeleteMessagesFromHistoryValidation(transaction: transaction, mediaBox: postbox.mediaBox, ids: [id])
+                             Logger.shared.log("HistoryValidation", "deleting thread message \(id) in \(id.peerId)")
+                         }
+                     }
