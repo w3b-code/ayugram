@@ -7,6 +7,12 @@ func ayuMigrateLegacyAppGroupData(from privateContainer: URL, to sharedContainer
     let fileManager = FileManager.default
     let source = privateContainer.appendingPathComponent("telegram-data", isDirectory: true)
     let destination = sharedContainer.appendingPathComponent("telegram-data", isDirectory: true)
+    // An import cut short (watchdog, crash, low space) leaves its staging copy, a full database, behind.
+    if let entries = try? fileManager.contentsOfDirectory(atPath: sharedContainer.path) {
+        for entry in entries where entry.hasPrefix(".ayugram-import-") {
+            try? fileManager.removeItem(at: sharedContainer.appendingPathComponent(entry, isDirectory: true))
+        }
+    }
     guard source.standardizedFileURL != destination.standardizedFileURL,
           fileManager.fileExists(atPath: source.path) else {
         return

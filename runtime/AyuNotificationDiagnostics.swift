@@ -73,6 +73,12 @@ public enum AyuNotificationDiagnostics {
         return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupIdentifier)
     }
 
+    /// Defaults shared by the app and its extensions; nil when the App Group is not available.
+    public static var sharedDefaults: UserDefaults? {
+        guard container != nil else { return nil }
+        return UserDefaults(suiteName: groupIdentifier)
+    }
+
     static func write(_ phase: Phase, to url: URL, hasBody: Bool? = nil, privacyHidden: Bool? = nil, processingSeconds: TimeInterval? = nil, accountRecords: Int? = nil, accountsWithPushKey: Int? = nil, deliveredOriginal: Bool? = nil, timestamp: TimeInterval = Date().timeIntervalSince1970) {
         self.lock.lock()
         defer { self.lock.unlock() }

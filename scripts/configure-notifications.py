@@ -74,6 +74,22 @@ def configure(root: Path):
                     if let category = fallback.category, ["r", "m"].contains(category), json["chat_id"] != nil || json["channel_id"] != nil {
                         fallback.category = "g" + category
                     }
+                    if aps["r"] != nil || aps["react_emoji"] != nil {
+                        fallback.category = "t"
+                    }
+                }
+                // As the full handler does: reactions get their category, forum topics their title and thread.
+                if json["r"] != nil || json["react_emoji"] != nil {
+                    fallback.category = "t"
+                }
+                if let topicTitle = json["topic_title"] as? String {
+                    fallback.title = alert.title.map { "\\(topicTitle) (\\($0))" } ?? topicTitle
+                }
+                if let value = json["topic_id"] as? String, let topicId = Int(value) {
+                    if let threadId = fallback.threadId {
+                        fallback.threadId = "\\(threadId):\\(topicId)"
+                    }
+                    fallback.userInfo["threadId"] = Int32(clamping: topicId)
                 }
                 payloadFallback = fallback
                 updateCurrentContent(fallback)
@@ -246,11 +262,29 @@ def configure(root: Path):
     })''')
     screen = replace_once(screen, '    windowImpl = { [weak controller] in', '    presentControllerImpl = { [weak controller] c in\n        controller?.present(c, in: .window(.root))\n    }\n    windowImpl = { [weak controller] in')
 
+    # The notification extension reads its own standard defaults, so it used to keep every deleted
+    # message even with saving off. The app mirrors that switch into the shared App Group.
+    settings_source = root / 'submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift'
+    values = settings_source.read_text()
+    values = replace_once(values, '        load("saveDeletedMessages", &values.saveDeletedMessages)\n', '''        load("saveDeletedMessages", &values.saveDeletedMessages)
+        if Bundle.main.bundlePath.hasSuffix(".appex") {
+            if let stored = AyuNotificationDiagnostics.sharedDefaults?.object(forKey: AyuSettings.keyPrefix + "saveDeletedMessages") as? Bool {
+                values.saveDeletedMessages = stored
+            }
+        } else {
+            AyuNotificationDiagnostics.sharedDefaults?.set(values.saveDeletedMessages, forKey: AyuSettings.keyPrefix + "saveDeletedMessages")
+        }
+''')
+    values = replace_once(values, '        store("saveDeletedMessages", updated.saveDeletedMessages)\n', '''        store("saveDeletedMessages", updated.saveDeletedMessages)
+        AyuNotificationDiagnostics.sharedDefaults?.set(updated.saveDeletedMessages, forKey: AyuSettings.keyPrefix + "saveDeletedMessages")
+''')
+
     helper = Path(__file__).resolve().parents[1] / 'runtime/AyuNotificationDiagnostics.swift'
     helper_source = helper.read_text()
     updates = {
         service: source,
         settings: screen,
+        settings_source: values,
         root / 'Telegram/NotificationService/Sources/AyuNotificationDiagnostics.swift': helper_source,
         root / 'submodules/AyuGram/AyuGramSettings/Sources/AyuNotificationDiagnostics.swift': helper_source,
         root / 'submodules/AyuGram/AyuGramSettings/Sources/AyuAppGroupResolver.swift': (helper.parent / 'AyuAppGroupResolver.swift').read_text(),

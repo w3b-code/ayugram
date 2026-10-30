@@ -12,6 +12,10 @@ struct AppGroupMigrationTests {
         try fm.createDirectory(at: data.appendingPathComponent("accounts-metadata"), withIntermediateDirectories: true)
         try fm.createDirectory(at: data.appendingPathComponent("account-123/postbox"), withIntermediateDirectories: true)
         try fm.createDirectory(at: shared, withIntermediateDirectories: true)
+        // A staging copy left by an import that never finished is removed on the next launch.
+        let leftover = shared.appendingPathComponent(".ayugram-import-interrupted")
+        try fm.createDirectory(at: leftover, withIntermediateDirectories: true)
+        try Data("partial-copy".utf8).write(to: leftover.appendingPathComponent("db"))
         let fixtures = [".tempkey": "key-and-salt", "accounts-metadata/db": "account-records", "accounts-metadata/db-wal": "pending-transactions", "account-123/postbox/db": "real-messages"]
         for (path, value) in fixtures {
             try Data(value.utf8).write(to: data.appendingPathComponent(path))

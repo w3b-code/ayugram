@@ -1,0 +1,163 @@
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
+index b824afb..67d9a3a 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
+@@ -95,7 +95,7 @@ public struct AyuAIModel {
+ public let ayuAIModels: [AyuAIModel] = [
+     AyuAIModel(id: "gemini-flash-lite-latest", title: "Flash-Lite — самая быстрая"),
+     AyuAIModel(id: "gemini-flash-latest", title: "Flash — умнее, медленнее"),
+-    AyuAIModel(id: "gemini-pro-latest", title: "Pro — самая умная, медленная")
++    AyuAIModel(id: "gemini-pro-latest", title: "Pro — самая умная, медленная; на бесплатном ключе может быть недоступна")
+ ]
+ 
+ /// The value of `AyuSettingsValues.aiModel` that tries every model, fastest first.
+@@ -220,6 +220,7 @@ private func ayuGeminiCall(model: String, instruction: String, text: String, max
+     // Thinking counts against the output limit, so the answer keeps its full room: 2.5 models get the
+     // given budget, newer ones think as they choose and get headroom for it.
+     let isGemini25 = model.hasPrefix("gemini-2.5-")
++    let thinkingBudget = model.contains("pro") ? max(thinkingBudget, 128) : thinkingBudget
+     var generationConfig: [String: Any] = ["temperature": 0.2, "maxOutputTokens": maxOutputTokens + (isGemini25 ? thinkingBudget : 4096)]
+     if isGemini25 {
+         generationConfig["thinkingConfig"] = ["thinkingBudget": thinkingBudget]
+@@ -265,8 +266,12 @@ private func ayuAIRequest(action: AyuAIAction, text: String, apiKey: String, mod
+     attempt(model)
+     ayuGeminiCall(model: model, instruction: action.instruction, text: text, maxOutputTokens: 2048, thinkingBudget: action.thinkingBudget, apiKey: apiKey, proxy: proxy, timeout: 45.0, completion: { result in
+         let status = result.status
+-        // The next model has its own capacity and limits.
+-        if [404, 429, 500, 503].contains(status) && models.count > 1 {
++        let errorMessage = (result.json?["error"] as? [String: Any])?["message"] as? String ?? ""
++        let isKeyError = errorMessage.localizedCaseInsensitiveContains("api key") || errorMessage.localizedCaseInsensitiveContains("api_key")
++        let isLocationError = errorMessage.localizedCaseInsensitiveContains("location")
++        // The next model has its own capacity, limits and options.
++        let isModelError = [404, 429, 500, 503].contains(status) || ([400, 403].contains(status) && !isKeyError && !isLocationError)
++        if isModelError && models.count > 1 {
+             ayuAIRequest(action: action, text: text, apiKey: apiKey, models: Array(models.dropFirst()), proxy: proxy, attempt: attempt, completion: completion)
+             return
+         }
+@@ -584,17 +589,59 @@ public func ayuAIPresent(context: AccountContext, action: AyuAIAction, text: Str
+     run()
+ }
+ 
+-/// The speed test's results, filled in as the models reply.
++/// The speed test's results in the order the models replied.
+ private final class AyuSpeedTestLines {
+-    var items: [String?]
++    let models: [String]
++    var finished: [(model: String, line: String)] = []
+ 
+-    init(count: Int) {
+-        self.items = Array(repeating: nil, count: count)
++    init(models: [String]) {
++        self.models = models
++    }
++
++    var isComplete: Bool {
++        return self.finished.count == self.models.count
++    }
++
++    var text: String {
++        var parts = self.finished.map { $0.line }
++        for model in self.models where !self.finished.contains(where: { $0.model == model }) {
++            parts.append("\(ayuAIModelTitle(model))\n⏳ проверяется…")
++        }
++        var text = parts.joined(separator: "\n\n")
++        if self.isComplete {
++            text += "\n\nВремя ответа на короткий вопрос через ваше соединение. Чем меньше, тем быстрее модель ответит и на сообщение. Flash-Lite, Flash и Pro — псевдонимы Google, которые всегда указывают на самую новую модель своего класса; в скобках указано, на какую именно. Остальные модели Google открыл для вашего ключа, они используются как запасные."
++        }
++        return text
+     }
+ }
+ 
+-/// Asks every model for a one-word reply at once and lists how fast each answered, or why it did
+-/// not: Google publishes no load figures, so the reply time is the measure of how busy a model is.
++private func ayuSpeedTestVerdict(_ result: AyuGeminiResult) -> String {
++    if ayuGeminiAnswer(result.json) != nil {
++        let seconds = String(format: "%.1f", result.elapsed)
++        if result.elapsed < 2.0 {
++            return "🟢 \(seconds) с — свободна"
++        } else if result.elapsed < 5.0 {
++            return "🟡 \(seconds) с — загружена"
++        } else {
++            return "🟠 \(seconds) с — сильно загружена"
++        }
++    } else if result.status == 503 || result.status == 500 {
++        return "🔴 перегружена"
++    } else if result.status == 429 {
++        return "🔴 лимит запросов исчерпан или модель закрыта для бесплатного ключа"
++    } else if result.status == 404 {
++        return "⚪️ недоступна"
++    } else if result.error != nil {
++        return "🔴 нет ответа"
++    } else if result.status == 200 {
++        return "🟠 ответила пустым текстом"
++    } else {
++        return "🔴 ошибка \(result.status)"
++    }
++}
++
++/// Asks every model for a one-word reply at once and lists each result as soon as it arrives:
++/// Google publishes no load figures, so the reply time is the measure of how busy a model is.
+ public func ayuAIPresentSpeedTest(context: AccountContext, window: UIWindow?) {
+     guard let resultController = ayuAIPresentSheet(title: "Скорость моделей", window: window) else {
+         return
+@@ -613,38 +660,18 @@ public func ayuAIPresentSpeedTest(context: AccountContext, window: UIWindow?) {
+                 for model in discovered where !testedModels.contains(model) && testedModels.count < 8 {
+                     testedModels.append(model)
+                 }
+-                let lines = AyuSpeedTestLines(count: testedModels.count)
+-                for (index, modelId) in testedModels.enumerated() {
++                let lines = AyuSpeedTestLines(models: testedModels)
++                resultController?.show(text: lines.text, isError: false)
++                for modelId in testedModels {
+                     ayuGeminiCall(model: modelId, instruction: "Ответь одним словом.", text: "Скажи: да", maxOutputTokens: 16, thinkingBudget: 0, apiKey: apiKey, proxy: proxy, timeout: 20.0, completion: { result in
+-                        let verdict: String
+-                        if ayuGeminiAnswer(result.json) != nil {
+-                            let seconds = String(format: "%.1f", result.elapsed)
+-                            if result.elapsed < 2.0 {
+-                                verdict = "🟢 \(seconds) с — свободна"
+-                            } else if result.elapsed < 5.0 {
+-                                verdict = "🟡 \(seconds) с — загружена"
+-                            } else {
+-                                verdict = "🟠 \(seconds) с — сильно загружена"
+-                            }
+-                        } else if result.status == 503 || result.status == 500 {
+-                            verdict = "🔴 перегружена"
+-                        } else if result.status == 429 {
+-                            verdict = "🔴 лимит запросов исчерпан"
+-                        } else if result.status == 404 {
+-                            verdict = "⚪️ недоступна"
+-                        } else if result.error != nil {
+-                            verdict = "🔴 нет ответа"
+-                        } else if result.status == 200 {
+-                            verdict = "🟠 ответила пустым текстом"
+-                        } else {
+-                            verdict = "🔴 ошибка \(result.status)"
++                        var title = ayuAIModelTitle(modelId)
++                        if let version = result.json?["modelVersion"] as? String, !version.isEmpty, version != modelId {
++                            title += " (\(version))"
+                         }
++                        let line = "\(title)\n\(ayuSpeedTestVerdict(result))"
+                         DispatchQueue.main.async {
+-                            lines.items[index] = "\(ayuAIModelTitle(modelId))\n\(verdict)"
+-                            if lines.items.allSatisfy({ $0 != nil }) {
+-                                let text = lines.items.compactMap { $0 }.joined(separator: "\n\n") + "\n\nВремя ответа на короткий вопрос через ваше соединение. Чем меньше, тем быстрее модель ответит и на сообщение. Кроме трёх основных, проверяются модели, которые Google открыл для вашего ключа; они используются как запасные."
+-                                resultController?.show(text: text, isError: false)
+-                            }
++                            lines.finished.append((modelId, line))
++                            resultController?.show(text: lines.text, isError: false)
+                         }
+                     })
+                 }
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+index 0a9665e..a90d6f2 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+@@ -243,7 +243,7 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues) -> [AyuGramSettin
+             choice(.aiModel, .aiModel(model.id), model.title, values.aiModel == model.id)
+         }
+         add { .testAIModels(id: $0, section: .aiModel) }
+-        footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее; Pro решает сложные задачи лучше всех, но на бесплатном тарифе у неё маленький лимит. Если модель недоступна, приложение берёт другие, которые Google открыл для вашего ключа. «Проверить скорость» спрашивает все модели и показывает, какая сейчас свободна.")
++        footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее; Pro решает сложные задачи лучше всех, но на бесплатном тарифе у неё маленький лимит. Если модель недоступна, приложение берёт другие, которые Google открыл для вашего ключа. «Проверить скорость» спрашивает все модели сразу и показывает каждую, как только она ответит, — быстрые первыми.")
+     }
+ 
+     header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
