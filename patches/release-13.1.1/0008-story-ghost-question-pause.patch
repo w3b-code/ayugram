@@ -1,0 +1,62 @@
+diff --git a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
+index f5b69a4..c7ca651 100644
+--- a/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
++++ b/submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryContainerScreen.swift
+@@ -425,6 +425,15 @@ private final class StoryContainerScreenComponent: Component {
+         
+         private var isAnimatingOut: Bool = false
+         private var didAnimateOut: Bool = false
++        /// AyuGram: the story waits while the ghost mode question is on screen.
++        private var ayuIsAskingAboutGhostMode: Bool = false
++        
++        func ayuSetAskingAboutGhostMode(_ value: Bool) {
++            if self.ayuIsAskingAboutGhostMode != value {
++                self.ayuIsAskingAboutGhostMode = value
++                self.state?.updated(transition: .immediate)
++            }
++        }
+         private var isDismissedExlusively: Bool = false
+         
+         var dismissWithoutTransitionOut: Bool = false
+@@ -1530,6 +1539,9 @@ private final class StoryContainerScreenComponent: Component {
+             if self.isDisplayingInteractionGuide {
+                 isProgressPaused = true
+             }
++            if self.ayuIsAskingAboutGhostMode {
++                isProgressPaused = true
++            }
+             
+             var contentDerivedBottomInset: CGFloat = environment.safeInsets.bottom
+             
+@@ -2259,11 +2271,28 @@ public class StoryContainerScreen: ViewControllerComponentContainer, KeyShortcut
+         guard self.ayuHoldsStoryReads else {
+             return
+         }
++        let componentView = self.node.hostView.componentView as? StoryContainerScreenComponent.View
++        componentView?.ayuSetAskingAboutGhostMode(true)
+         let alert = textAlertController(context: self.context, title: "Режим призрака", text: "Включить режим призрака на время просмотра? Автор не увидит, что вы посмотрели историю. После закрытия историй режим выключится.", actions: [
+-            TextAlertAction(type: .genericAction, title: "Нет", action: { [weak self] in
+-                self?.ayuReleaseStoryReads()
++            TextAlertAction(type: .genericAction, title: "Нет", action: { [weak self, weak componentView] in
++                guard let self else {
++                    return
++                }
++                componentView?.ayuSetAskingAboutGhostMode(false)
++                self.ayuReleaseStoryReads()
++                // The view of the story shown under the question was held back, not sent; send it now.
++                let context = self.context
++                let _ = (self.focusedItemPromise.get()
++                |> take(1)
++                |> deliverOnMainQueue).startStandalone(next: { id in
++                    guard let id else {
++                        return
++                    }
++                    let _ = context.engine.messages.markStoryAsSeen(peerId: id.peerId, id: id.id, asPinned: false).startStandalone()
++                })
+             }),
+-            TextAlertAction(type: .defaultAction, title: "Включить", action: { [weak self] in
++            TextAlertAction(type: .defaultAction, title: "Включить", action: { [weak self, weak componentView] in
++                componentView?.ayuSetAskingAboutGhostMode(false)
+                 let current = AyuSettings.shared.values
+                 self?.ayuGhostValuesToRestore = (current.ghostModeEnabled, current.sendReadStoryPackets)
+                 AyuSettings.shared.update { values in
