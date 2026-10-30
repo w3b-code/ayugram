@@ -168,6 +168,7 @@ def configure(root: Path):
         settings: screen,
         root / 'Telegram/NotificationService/Sources/AyuNotificationDiagnostics.swift': helper_source,
         root / 'submodules/AyuGram/AyuGramSettings/Sources/AyuNotificationDiagnostics.swift': helper_source,
+        root / 'submodules/AyuGram/AyuGramSettings/Sources/AyuAppGroupResolver.swift': (helper.parent / 'AyuAppGroupResolver.swift').read_text(),
         root / 'submodules/TelegramCore/Sources/AyuGram/AyuHistoryRetention.swift': (helper.parent / 'AyuHistoryRetention.swift').read_text(),
     }
     for path, text in updates.items():
