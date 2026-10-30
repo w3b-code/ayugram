@@ -1,0 +1,1140 @@
+diff --git a/submodules/AyuGram/AyuAutoSend/BUILD b/submodules/AyuGram/AyuAutoSend/BUILD
+new file mode 100644
+index 0000000..10d8604
+--- /dev/null
++++ b/submodules/AyuGram/AyuAutoSend/BUILD
+@@ -0,0 +1,25 @@
++load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
++
++swift_library(
++    name = "AyuAutoSend",
++    module_name = "AyuAutoSend",
++    srcs = glob([
++        "Sources/**/*.swift",
++    ]),
++    copts = [
++        "-warnings-as-errors",
++    ],
++    deps = [
++        "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
++        "//submodules/Display:Display",
++        "//submodules/TelegramCore:TelegramCore",
++        "//submodules/TelegramPresentationData:TelegramPresentationData",
++        "//submodules/AccountContext:AccountContext",
++        "//submodules/ItemListUI:ItemListUI",
++        "//submodules/PresentationDataUtils:PresentationDataUtils",
++        "//submodules/AyuGram/AyuGramSettings",
++    ],
++    visibility = [
++        "//visibility:public",
++    ],
++)
+diff --git a/submodules/AyuGram/AyuAutoSend/Sources/AyuAutoSendController.swift b/submodules/AyuGram/AyuAutoSend/Sources/AyuAutoSendController.swift
+new file mode 100644
+index 0000000..454fc28
+--- /dev/null
++++ b/submodules/AyuGram/AyuAutoSend/Sources/AyuAutoSendController.swift
+@@ -0,0 +1,403 @@
++import Foundation
++import UIKit
++import AVFoundation
++import PhotosUI
++import UniformTypeIdentifiers
++import Display
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import AccountContext
++import ItemListUI
++import PresentationDataUtils
++
++private final class AyuAutoSendArguments {
++    let updateText: (String) -> Void
++    let updateInterval: (String) -> Void
++    let addMedia: () -> Void
++    let removeMedia: (String) -> Void
++    let toggle: () -> Void
++
++    init(updateText: @escaping (String) -> Void, updateInterval: @escaping (String) -> Void, addMedia: @escaping () -> Void, removeMedia: @escaping (String) -> Void, toggle: @escaping () -> Void) {
++        self.updateText = updateText
++        self.updateInterval = updateInterval
++        self.addMedia = addMedia
++        self.removeMedia = removeMedia
++        self.toggle = toggle
++    }
++}
++
++private enum AyuAutoSendSection: Int32 {
++    case text
++    case media
++    case interval
++    case control
++}
++
++private enum AyuAutoSendEntry: ItemListNodeEntry {
++    case textHeader
++    case text(String)
++    case mediaHeader
++    case mediaItem(index: Int32, fileName: String, title: String)
++    case addMedia(enabled: Bool)
++    case mediaFooter
++    case intervalHeader
++    case interval(String)
++    case intervalFooter(String)
++    case toggle(isRunning: Bool)
++    case status(String)
++
++    var section: ItemListSectionId {
++        switch self {
++        case .textHeader, .text:
++            return AyuAutoSendSection.text.rawValue
++        case .mediaHeader, .mediaItem, .addMedia, .mediaFooter:
++            return AyuAutoSendSection.media.rawValue
++        case .intervalHeader, .interval, .intervalFooter:
++            return AyuAutoSendSection.interval.rawValue
++        case .toggle, .status:
++            return AyuAutoSendSection.control.rawValue
++        }
++    }
++
++    var stableId: Int32 {
++        switch self {
++        case .textHeader:
++            return 0
++        case .text:
++            return 1
++        case .mediaHeader:
++            return 2
++        case let .mediaItem(index, _, _):
++            return 10 + index
++        case .addMedia:
++            return 100
++        case .mediaFooter:
++            return 101
++        case .intervalHeader:
++            return 200
++        case .interval:
++            return 201
++        case .intervalFooter:
++            return 202
++        case .toggle:
++            return 300
++        case .status:
++            return 301
++        }
++    }
++
++    static func <(lhs: AyuAutoSendEntry, rhs: AyuAutoSendEntry) -> Bool {
++        return lhs.stableId < rhs.stableId
++    }
++
++    func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
++        let arguments = arguments as! AyuAutoSendArguments
++        switch self {
++        case .textHeader:
++            return ItemListSectionHeaderItem(presentationData: presentationData, text: "ТЕКСТ", sectionId: self.section)
++        case let .text(text):
++            return ItemListMultilineInputItem(presentationData: presentationData, systemStyle: .glass, text: text, placeholder: "Текст сообщения", maxLength: ItemListMultilineInputItemTextLimit(value: 4096, display: false), sectionId: self.section, style: .blocks, textUpdated: { value in
++                arguments.updateText(value)
++            })
++        case .mediaHeader:
++            return ItemListSectionHeaderItem(presentationData: presentationData, text: "МЕДИА", sectionId: self.section)
++        case let .mediaItem(_, fileName, title):
++            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: title, kind: .destructive, alignment: .natural, sectionId: self.section, style: .blocks, action: {
++                arguments.removeMedia(fileName)
++            })
++        case let .addMedia(enabled):
++            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: "Добавить фото или видео", kind: enabled ? .generic : .disabled, alignment: .natural, sectionId: self.section, style: .blocks, action: {
++                arguments.addMedia()
++            })
++        case .mediaFooter:
++            return ItemListTextItem(presentationData: presentationData, text: .plain("До 10 фото и видео; несколько уходят одним альбомом, текст становится подписью. Нажатие на добавленное удаляет его."), sectionId: self.section)
++        case .intervalHeader:
++            return ItemListSectionHeaderItem(presentationData: presentationData, text: "ИНТЕРВАЛ, СЕКУНД", sectionId: self.section)
++        case let .interval(text):
++            return ItemListSingleLineInputItem(presentationData: presentationData, systemStyle: .glass, title: NSAttributedString(), text: text, placeholder: "60", type: .number, sectionId: self.section, textUpdated: { value in
++                arguments.updateInterval(value)
++            }, action: {})
++        case let .intervalFooter(text):
++            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        case let .toggle(isRunning):
++            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: isRunning ? "Остановить" : "Запустить", kind: isRunning ? .destructive : .generic, alignment: .center, sectionId: self.section, style: .blocks, action: {
++                arguments.toggle()
++            })
++        case let .status(text):
++            return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        }
++    }
++}
++
++private struct AyuAutoSendState: Equatable {
++    var template: AyuAutoSendTemplate
++    var intervalText: String
++    var isImporting: Bool
++}
++
++private func ayuAutoSendIntervalDescription(_ seconds: Int32) -> String {
++    if seconds <= 0 {
++        return "Укажите интервал больше нуля."
++    }
++    let hours = seconds / 3600
++    let minutes = (seconds % 3600) / 60
++    let rest = seconds % 60
++    var parts: [String] = []
++    if hours > 0 {
++        parts.append("\(hours) ч")
++    }
++    if minutes > 0 {
++        parts.append("\(minutes) мин")
++    }
++    if rest > 0 {
++        parts.append("\(rest) с")
++    }
++    return "Сообщение уходит сразу после запуска и затем каждые \(parts.joined(separator: " ")). Отправка идёт, пока приложение открыто; в фоне — только с «Держать в фоне» в настройках AyuGram."
++}
++
++private func ayuAutoSendEntries(state: AyuAutoSendState, status: AyuAutoSendStatus) -> [AyuAutoSendEntry] {
++    var entries: [AyuAutoSendEntry] = []
++    entries.append(.textHeader)
++    entries.append(.text(state.template.text))
++    entries.append(.mediaHeader)
++    var photoIndex = 0
++    var videoIndex = 0
++    for (index, item) in state.template.media.enumerated() {
++        let title: String
++        if item.isVideo {
++            videoIndex += 1
++            let seconds = Int(item.duration.rounded())
++            title = "🎬 Видео \(videoIndex) · \(seconds / 60):\(String(format: "%02d", seconds % 60))"
++        } else {
++            photoIndex += 1
++            title = "📷 Фото \(photoIndex)"
++        }
++        entries.append(.mediaItem(index: Int32(index), fileName: item.fileName, title: title))
++    }
++    entries.append(.addMedia(enabled: !state.isImporting && state.template.media.count < 10))
++    entries.append(.mediaFooter)
++    entries.append(.intervalHeader)
++    entries.append(.interval(state.intervalText))
++    entries.append(.intervalFooter(ayuAutoSendIntervalDescription(state.template.interval)))
++    entries.append(.toggle(isRunning: status.isRunning))
++    if status.isRunning {
++        var text = "Работает. Отправлено: \(status.sentCount)"
++        if let lastSent = status.lastSent {
++            let formatter = DateFormatter()
++            formatter.dateFormat = "HH:mm:ss"
++            text += ", последнее в \(formatter.string(from: Date(timeIntervalSince1970: Double(lastSent))))"
++        }
++        entries.append(.status(text + "."))
++    } else if state.isImporting {
++        entries.append(.status("Подготовка медиа…"))
++    }
++    return entries
++}
++
++@available(iOS 14.0, *)
++private final class AyuAutoSendPickerDelegate: NSObject, PHPickerViewControllerDelegate {
++    let completion: ([PHPickerResult]) -> Void
++
++    init(completion: @escaping ([PHPickerResult]) -> Void) {
++        self.completion = completion
++    }
++
++    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
++        picker.dismiss(animated: true)
++        self.completion(results)
++    }
++}
++
++/// The picker holds its delegate weakly.
++private var ayuAutoSendPickerDelegate: AnyObject?
++
++private func ayuAutoSendScaled(_ image: UIImage, maxSide: CGFloat) -> UIImage {
++    let factor = min(1.0, maxSide / max(image.size.width, image.size.height, 1.0))
++    let size = CGSize(width: floor(image.size.width * factor), height: floor(image.size.height * factor))
++    let format = UIGraphicsImageRendererFormat.default()
++    format.scale = 1.0
++    format.opaque = true
++    // Drawing also applies the photo's orientation to the pixels.
++    return UIGraphicsImageRenderer(size: size, format: format).image { _ in
++        image.draw(in: CGRect(origin: CGPoint(), size: size))
++    }
++}
++
++private func ayuAutoSendExportVideo(source: URL, directory: URL, completion: @escaping (AyuAutoSendMedia?) -> Void) {
++    let asset = AVURLAsset(url: source)
++    let fileName = UUID().uuidString + ".mp4"
++    let output = directory.appendingPathComponent(fileName)
++    guard let sessionValue = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else {
++        try? FileManager.default.removeItem(at: source)
++        completion(nil)
++        return
++    }
++    #if compiler(>=6.0)
++    nonisolated(unsafe) let session = sessionValue
++    #else
++    let session = sessionValue
++    #endif
++    session.outputURL = output
++    session.outputFileType = .mp4
++    session.shouldOptimizeForNetworkUse = true
++    session.exportAsynchronously {
++        try? FileManager.default.removeItem(at: source)
++        guard session.status == .completed else {
++            try? FileManager.default.removeItem(at: output)
++            completion(nil)
++            return
++        }
++        let exported = AVURLAsset(url: output)
++        var size = CGSize(width: 1280.0, height: 720.0)
++        if let track = exported.tracks(withMediaType: .video).first {
++            let transformed = track.naturalSize.applying(track.preferredTransform)
++            size = CGSize(width: abs(transformed.width), height: abs(transformed.height))
++        }
++        completion(AyuAutoSendMedia(fileName: fileName, isVideo: true, width: Int32(size.width), height: Int32(size.height), duration: CMTimeGetSeconds(exported.duration)))
++    }
++}
++
++/// Copies a picked item into the app's folder: photos as JPEG, videos as MP4. Calls back on any queue.
++@available(iOS 14.0, *)
++private func ayuAutoSendImport(_ result: PHPickerResult, completion: @escaping (AyuAutoSendMedia?) -> Void) {
++    guard let directory = AyuAutoSender.mediaDirectory else {
++        completion(nil)
++        return
++    }
++    let provider = result.itemProvider
++    if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
++        provider.loadFileRepresentation(forTypeIdentifier: UTType.movie.identifier, completionHandler: { url, _ in
++            guard let url = url else {
++                completion(nil)
++                return
++            }
++            // The system deletes the provided file once this handler returns.
++            let source = directory.appendingPathComponent(UUID().uuidString + "." + (url.pathExtension.isEmpty ? "mov" : url.pathExtension))
++            do {
++                try FileManager.default.copyItem(at: url, to: source)
++            } catch {
++                completion(nil)
++                return
++            }
++            ayuAutoSendExportVideo(source: source, directory: directory, completion: completion)
++        })
++    } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
++        provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier, completionHandler: { data, _ in
++            guard let data = data, let image = UIImage(data: data) else {
++                completion(nil)
++                return
++            }
++            let scaled = ayuAutoSendScaled(image, maxSide: 2560.0)
++            let fileName = UUID().uuidString + ".jpg"
++            guard let jpeg = scaled.jpegData(compressionQuality: 0.9), (try? jpeg.write(to: directory.appendingPathComponent(fileName))) != nil else {
++                completion(nil)
++                return
++            }
++            completion(AyuAutoSendMedia(fileName: fileName, isVideo: false, width: Int32(scaled.size.width), height: Int32(scaled.size.height), duration: 0.0))
++        })
++    } else {
++        completion(nil)
++    }
++}
++
++/// The lightning button's screen: the chat's template, its interval, and start/stop.
++public func ayuAutoSendController(context: AccountContext, peerId: EnginePeer.Id, threadId: Int64?) -> ViewController {
++    let sender = AyuAutoSender.shared
++    let key = AyuAutoSender.key(context: context, peerId: peerId, threadId: threadId)
++    let initialTemplate = sender.template(key: key)
++    let statePromise = ValuePromise(AyuAutoSendState(template: initialTemplate, intervalText: "\(initialTemplate.interval)", isImporting: false), ignoreRepeated: true)
++    let stateValue = Atomic(value: AyuAutoSendState(template: initialTemplate, intervalText: "\(initialTemplate.interval)", isImporting: false))
++    let updateState: ((inout AyuAutoSendState) -> Void) -> Void = { f in
++        let updated = stateValue.modify { state in
++            var state = state
++            f(&state)
++            return state
++        }
++        statePromise.set(updated)
++        sender.setTemplate(updated.template, key: key)
++    }
++
++    var presentControllerImpl: ((ViewController) -> Void)?
++    var presentPickerImpl: (() -> Void)?
++
++    let arguments = AyuAutoSendArguments(updateText: { text in
++        updateState { $0.template.text = text }
++    }, updateInterval: { text in
++        let digits = text.filter { $0.isNumber }
++        updateState { state in
++            state.intervalText = digits
++            state.template.interval = Int32(clamping: Int(digits) ?? 0)
++        }
++    }, addMedia: {
++        presentPickerImpl?()
++    }, removeMedia: { fileName in
++        updateState { $0.template.media.removeAll(where: { $0.fileName == fileName }) }
++    }, toggle: {
++        if sender.isRunning(key: key) {
++            sender.stop(key: key)
++        } else if !sender.start(context: context, peerId: peerId, threadId: threadId) {
++            let presentationData = context.sharedContext.currentPresentationData.with { $0 }
++            presentControllerImpl?(textAlertController(context: context, title: "Нечего отправлять", text: "Добавьте текст или медиа и укажите интервал больше нуля.", actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_OK, action: {})]))
++        }
++    })
++
++    let signal = combineLatest(queue: .mainQueue(),
++        context.sharedContext.presentationData,
++        statePromise.get(),
++        sender.status(key: key)
++    )
++    |> map { presentationData, state, status -> (ItemListControllerState, (ItemListNodeState, Any)) in
++        let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text("Автоотправка"), leftNavigationButton: nil, rightNavigationButton: nil, backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back))
++        let listState = ItemListNodeState(presentationData: ItemListPresentationData(presentationData), entries: ayuAutoSendEntries(state: state, status: status), style: .blocks, animateChanges: false)
++        return (controllerState, (listState, arguments))
++    }
++
++    let controller = ItemListController(context: context, state: signal)
++    presentControllerImpl = { [weak controller] c in
++        controller?.present(c, in: .window(.root))
++    }
++    presentPickerImpl = { [weak controller] in
++        guard #available(iOS 14.0, *), let controller = controller, var presenter = controller.view.window?.rootViewController else {
++            return
++        }
++        while let presented = presenter.presentedViewController {
++            presenter = presented
++        }
++        var configuration = PHPickerConfiguration()
++        configuration.filter = .any(of: [.images, .videos])
++        configuration.selectionLimit = max(1, 10 - stateValue.with { $0.template.media.count })
++        let picker = PHPickerViewController(configuration: configuration)
++        let delegate = AyuAutoSendPickerDelegate(completion: { results in
++            ayuAutoSendPickerDelegate = nil
++            if results.isEmpty {
++                return
++            }
++            updateState { $0.isImporting = true }
++            var imported: [Int: AyuAutoSendMedia] = [:]
++            var remaining = results.count
++            for (index, result) in results.enumerated() {
++                ayuAutoSendImport(result, completion: { media in
++                    // SwiftSignalKit's queue takes a plain closure, which may update these counters.
++                    Queue.mainQueue().async {
++                        if let media = media {
++                            imported[index] = media
++                        }
++                        remaining -= 1
++                        if remaining == 0 {
++                            let added = imported.keys.sorted().compactMap { imported[$0] }
++                            updateState { state in
++                                state.isImporting = false
++                                state.template.media.append(contentsOf: added.prefix(max(0, 10 - state.template.media.count)))
++                            }
++                        }
++                    }
++                })
++            }
++        })
++        ayuAutoSendPickerDelegate = delegate
++        picker.delegate = delegate
++        presenter.present(picker, animated: true)
++    }
++    return controller
++}
+diff --git a/submodules/AyuGram/AyuAutoSend/Sources/AyuAutoSender.swift b/submodules/AyuGram/AyuAutoSend/Sources/AyuAutoSender.swift
+new file mode 100644
+index 0000000..8442e33
+--- /dev/null
++++ b/submodules/AyuGram/AyuAutoSend/Sources/AyuAutoSender.swift
+@@ -0,0 +1,250 @@
++import Foundation
++import UIKit
++import SwiftSignalKit
++import TelegramCore
++import AccountContext
++import AyuGramSettings
++
++/// A photo or video picked for a template, kept in the app's own folder.
++public struct AyuAutoSendMedia: Codable, Equatable {
++    public var fileName: String
++    public var isVideo: Bool
++    public var width: Int32
++    public var height: Int32
++    public var duration: Double
++}
++
++/// What one chat sends repeatedly: a text, media, or both, every `interval` seconds.
++public struct AyuAutoSendTemplate: Codable, Equatable {
++    public var text: String
++    public var media: [AyuAutoSendMedia]
++    public var interval: Int32
++
++    public static let empty = AyuAutoSendTemplate(text: "", media: [], interval: 60)
++
++    var isSendable: Bool {
++        return (!self.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !self.media.isEmpty) && self.interval > 0
++    }
++}
++
++public struct AyuAutoSendStatus: Equatable {
++    public var isRunning: Bool
++    public var sentCount: Int
++    public var lastSent: Int32?
++
++    static let stopped = AyuAutoSendStatus(isRunning: false, sentCount: 0, lastSent: nil)
++}
++
++/// Sends each chat's template on a timer while the app runs. iOS suspends the app soon after it
++/// goes to the background, and the timer waits with it ("Keep alive in background" prevents that).
++/// Everything here runs on the main queue.
++public final class AyuAutoSender {
++    public static let shared = AyuAutoSender()
++
++    private final class Task {
++        let context: AccountContext
++        let peerId: EnginePeer.Id
++        let threadId: Int64?
++        var interval: Int32
++        var timer: SwiftSignalKit.Timer?
++        var sentCount = 0
++        var lastSent: Int32?
++
++        init(context: AccountContext, peerId: EnginePeer.Id, threadId: Int64?, interval: Int32) {
++            self.context = context
++            self.peerId = peerId
++            self.threadId = threadId
++            self.interval = interval
++        }
++    }
++
++    private var tasks: [String: Task] = [:]
++    private let statuses = ValuePromise<[String: AyuAutoSendStatus]>([:], ignoreRepeated: true)
++    private var settingsDisposable: Disposable?
++
++    private init() {
++        // Turning the feature off in the settings stops every chat.
++        self.settingsDisposable = (AyuSettings.shared.signal
++        |> map { $0.autoSendEnabled }
++        |> distinctUntilChanged
++        |> deliverOnMainQueue).startStrict(next: { [weak self] enabled in
++            if !enabled {
++                self?.stopAll()
++            }
++        })
++    }
++
++    public static func key(context: AccountContext, peerId: EnginePeer.Id, threadId: Int64?) -> String {
++        return "\(context.account.peerId.toInt64()):\(peerId.toInt64()):\(threadId ?? 0)"
++    }
++
++    static var mediaDirectory: URL? {
++        guard let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true) else {
++            return nil
++        }
++        let directory = base.appendingPathComponent("ayu-autosend", isDirectory: true)
++        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++        return directory
++    }
++
++    private static func defaultsKey(_ key: String) -> String {
++        return "ayugram.autosend." + key
++    }
++
++    public func template(key: String) -> AyuAutoSendTemplate {
++        guard let data = UserDefaults.standard.data(forKey: AyuAutoSender.defaultsKey(key)), let template = try? JSONDecoder().decode(AyuAutoSendTemplate.self, from: data) else {
++            return .empty
++        }
++        return template
++    }
++
++    public func setTemplate(_ template: AyuAutoSendTemplate, key: String) {
++        let previous = self.template(key: key)
++        if let data = try? JSONEncoder().encode(template) {
++            UserDefaults.standard.set(data, forKey: AyuAutoSender.defaultsKey(key))
++        }
++        // Files no longer in the template are not needed.
++        if let directory = AyuAutoSender.mediaDirectory {
++            for item in previous.media where !template.media.contains(where: { $0.fileName == item.fileName }) {
++                try? FileManager.default.removeItem(at: directory.appendingPathComponent(item.fileName))
++            }
++        }
++        if let task = self.tasks[key], task.interval != template.interval, template.interval > 0 {
++            task.interval = template.interval
++            self.schedule(key: key, task: task)
++        }
++    }
++
++    public func status(key: String) -> Signal<AyuAutoSendStatus, NoError> {
++        return self.statuses.get()
++        |> map { $0[key] ?? .stopped }
++        |> distinctUntilChanged
++    }
++
++    public func isRunning(key: String) -> Bool {
++        return self.tasks[key] != nil
++    }
++
++    /// Sends the template at once and then every interval. False if there is nothing to send.
++    public func start(context: AccountContext, peerId: EnginePeer.Id, threadId: Int64?) -> Bool {
++        let key = AyuAutoSender.key(context: context, peerId: peerId, threadId: threadId)
++        let template = self.template(key: key)
++        guard template.isSendable else {
++            return false
++        }
++        self.stop(key: key)
++        let task = Task(context: context, peerId: peerId, threadId: threadId, interval: template.interval)
++        self.tasks[key] = task
++        self.send(key: key)
++        self.schedule(key: key, task: task)
++        return true
++    }
++
++    public func stop(key: String) {
++        if let task = self.tasks.removeValue(forKey: key) {
++            task.timer?.invalidate()
++            self.updateStatuses()
++        }
++    }
++
++    private func stopAll() {
++        for key in Array(self.tasks.keys) {
++            self.stop(key: key)
++        }
++    }
++
++    private func schedule(key: String, task: Task) {
++        task.timer?.invalidate()
++        let timer = SwiftSignalKit.Timer(timeout: Double(task.interval), repeat: true, completion: { [weak self] in
++            self?.send(key: key)
++        }, queue: Queue.mainQueue())
++        task.timer = timer
++        timer.start()
++    }
++
++    private func send(key: String) {
++        guard let task = self.tasks[key] else {
++            return
++        }
++        let messages = AyuAutoSender.messages(context: task.context, template: self.template(key: key), threadId: task.threadId)
++        if messages.isEmpty {
++            self.stop(key: key)
++            return
++        }
++        let _ = enqueueMessages(account: task.context.account, peerId: task.peerId, messages: messages).startStandalone()
++        task.sentCount += 1
++        task.lastSent = Int32(Date().timeIntervalSince1970)
++        self.updateStatuses()
++    }
++
++    private func updateStatuses() {
++        var result: [String: AyuAutoSendStatus] = [:]
++        for (key, task) in self.tasks {
++            result[key] = AyuAutoSendStatus(isRunning: true, sentCount: task.sentCount, lastSent: task.lastSent)
++        }
++        self.statuses.set(result)
++    }
++
++    /// A fresh set of messages for each send: local media is uploaded anew every time.
++    private static func messages(context: AccountContext, template: AyuAutoSendTemplate, threadId: Int64?) -> [EnqueueMessage] {
++        let text = template.text.trimmingCharacters(in: .whitespacesAndNewlines)
++        var media: [AnyMediaReference] = []
++        if let directory = AyuAutoSender.mediaDirectory {
++            for item in template.media {
++                let path = directory.appendingPathComponent(item.fileName).path
++                guard FileManager.default.fileExists(atPath: path) else {
++                    continue
++                }
++                let dimensions = PixelDimensions(width: item.width, height: item.height)
++                if item.isVideo {
++                    let size = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber)?.int64Value
++                    let resource = LocalFileReferenceMediaResource(localFilePath: path, randomId: Int64.random(in: Int64.min ... Int64.max))
++                    let file = TelegramMediaFile(
++                        fileId: EngineMedia.Id(namespace: Namespaces.Media.LocalFile, id: Int64.random(in: Int64.min ... Int64.max)),
++                        partialReference: nil,
++                        resource: resource,
++                        previewRepresentations: [],
++                        videoThumbnails: [],
++                        immediateThumbnailData: nil,
++                        mimeType: "video/mp4",
++                        size: size,
++                        attributes: [
++                            .Video(duration: item.duration, size: dimensions, flags: [.supportsStreaming], preloadSize: nil, coverTime: nil, videoCodec: nil),
++                            .FileName(fileName: "video.mp4")
++                        ],
++                        alternativeRepresentations: []
++                    )
++                    media.append(.standalone(media: file))
++                } else {
++                    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
++                        continue
++                    }
++                    let resource = LocalFileMediaResource(fileId: Int64.random(in: Int64.min ... Int64.max))
++                    context.engine.resources.storeResourceData(id: EngineMediaResource.Id(resource.id), data: data, synchronous: true)
++                    let image = TelegramMediaImage(
++                        imageId: EngineMedia.Id(namespace: Namespaces.Media.LocalImage, id: Int64.random(in: Int64.min ... Int64.max)),
++                        representations: [TelegramMediaImageRepresentation(dimensions: dimensions, resource: resource, progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)],
++                        immediateThumbnailData: nil,
++                        reference: nil,
++                        partialReference: nil,
++                        flags: []
++                    )
++                    media.append(.standalone(media: image))
++                }
++            }
++        }
++        if media.isEmpty {
++            if text.isEmpty {
++                return []
++            }
++            return [EnqueueMessage.message(text: text, attributes: [], inlineStickers: [:], mediaReference: nil, threadId: threadId, replyToMessageId: nil, replyToStoryId: nil, localGroupingKey: nil, correlationId: nil, bubbleUpEmojiOrStickersets: [])]
++        }
++        // Several items go as one album, with the text as its caption.
++        let groupingKey: Int64? = media.count > 1 ? Int64.random(in: Int64.min ... Int64.max) : nil
++        var messages: [EnqueueMessage] = []
++        for (index, mediaReference) in media.enumerated() {
++            messages.append(EnqueueMessage.message(text: index == 0 ? text : "", attributes: [], inlineStickers: [:], mediaReference: mediaReference, threadId: threadId, replyToMessageId: nil, replyToStoryId: nil, localGroupingKey: groupingKey, correlationId: nil, bubbleUpEmojiOrStickersets: []))
++        }
++        return messages
++    }
++}
+diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
+index c0304df..88dc69d 100644
+--- a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
++++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
+@@ -64,6 +64,10 @@ public struct AyuSettingsValues: Equatable {
+     /// The Gemini model asked first, or "auto" for the fastest.
+     public var aiModel: String
+ 
++    // Messages.
++    /// The lightning button in the input field: a chat's template sent again on a timer.
++    public var autoSendEnabled: Bool
++
+     public static let `default` = AyuSettingsValues(
+         ghostModeEnabled: false,
+         sendReadMessagePackets: false,
+@@ -87,7 +91,8 @@ public struct AyuSettingsValues: Equatable {
+         showProfileTab: true,
+         aiEnabled: false,
+         aiApiKey: "",
+-        aiModel: "auto"
++        aiModel: "auto",
++        autoSendEnabled: false
+     )
+ 
+     /// Whether `name` (a TL function name such as `messages.readHistory`) must not reach the server:
+@@ -202,6 +207,7 @@ public final class AyuSettings {
+         load("showMessageSeconds", &values.showMessageSeconds)
+         load("showProfileTab", &values.showProfileTab)
+         load("aiEnabled", &values.aiEnabled)
++        load("autoSendEnabled", &values.autoSendEnabled)
+         if let apiKey = UserDefaults.standard.string(forKey: AyuSettings.keyPrefix + "aiApiKey") {
+             values.aiApiKey = apiKey
+         }
+@@ -313,6 +319,7 @@ public final class AyuSettings {
+         store("showMessageSeconds", updated.showMessageSeconds)
+         store("showProfileTab", updated.showProfileTab)
+         store("aiEnabled", updated.aiEnabled)
++        store("autoSendEnabled", updated.autoSendEnabled)
+         defaults.set(updated.aiApiKey, forKey: AyuSettings.keyPrefix + "aiApiKey")
+         defaults.set(updated.aiModel, forKey: AyuSettings.keyPrefix + "aiModel")
+ 
+diff --git a/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift b/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift
+index a3dff43..515ebbd 100644
+--- a/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift
++++ b/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift
+@@ -12,6 +12,7 @@ public enum ChatTextInputAccessoryItem: Equatable {
+         case scheduledMessages
+         case gift
+         case suggestPost
++        case ayuAutoSend
+     }
+     
+     public enum InputMode: Hashable {
+@@ -29,6 +30,8 @@ public enum ChatTextInputAccessoryItem: Equatable {
+     case scheduledMessages
+     case gift
+     case suggestPost
++    /// AyuGram: opens the chat's timed auto-send template.
++    case ayuAutoSend
+     
+     public var key: Key {
+         switch self {
+@@ -48,6 +51,8 @@ public enum ChatTextInputAccessoryItem: Equatable {
+             return .gift
+         case .suggestPost:
+             return .suggestPost
++        case .ayuAutoSend:
++            return .ayuAutoSend
+         }
+     }
+ }
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+index a90d6f2..e9b0132 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+@@ -11,20 +11,52 @@ import AyuGramSettings
+ 
+ private final class AyuGramSettingsControllerArguments {
+     let update: ((inout AyuSettingsValues) -> Void) -> Void
++    let openPage: (AyuGramSettingsPage) -> Void
+     let testAIModels: () -> Void
+ 
+-    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void, testAIModels: @escaping () -> Void) {
++    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void, openPage: @escaping (AyuGramSettingsPage) -> Void, testAIModels: @escaping () -> Void) {
+         self.update = update
++        self.openPage = openPage
+         self.testAIModels = testAIModels
+     }
+ }
+ 
++/// The settings are split into a few groups, each on its own screen.
++private enum AyuGramSettingsPage: Equatable {
++    case root
++    case ghost
++    case messages
++    case interface
++    case ai
++    case other
++
++    var title: String {
++        switch self {
++        case .root:
++            return "AyuGram"
++        case .ghost:
++            return "Режим призрака"
++        case .messages:
++            return "Сообщения"
++        case .interface:
++            return "Интерфейс"
++        case .ai:
++            return "Нейросеть"
++        case .other:
++            return "Дополнительно"
++        }
++    }
++}
++
+ private enum AyuGramSettingsSection: Int32 {
++    case pages
+     case ghost
+     case ghostOptions
+     case ghostExtras
+     case sendWithoutSound
+     case saving
++    case autoSend
++    case background
+     case interface
+     case ai
+     case aiModel
+@@ -52,6 +84,7 @@ private enum AyuGramToggle: Equatable {
+     case showMessageSeconds
+     case showProfileTab
+     case ai
++    case autoSend
+ 
+     func apply(_ values: inout AyuSettingsValues, _ value: Bool) {
+         switch self {
+@@ -94,6 +127,8 @@ private enum AyuGramToggle: Equatable {
+             values.showProfileTab = value
+         case .ai:
+             values.aiEnabled = value
++        case .autoSend:
++            values.autoSendEnabled = value
+         }
+     }
+ }
+@@ -118,6 +153,7 @@ private enum AyuGramChoice: Equatable {
+ 
+ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+     case header(id: Int32, section: AyuGramSettingsSection, text: String)
++    case page(id: Int32, section: AyuGramSettingsSection, page: AyuGramSettingsPage, label: String)
+     case toggle(id: Int32, section: AyuGramSettingsSection, toggle: AyuGramToggle, title: String, value: Bool, enabled: Bool)
+     case choice(id: Int32, section: AyuGramSettingsSection, choice: AyuGramChoice, title: String, checked: Bool)
+     case footer(id: Int32, section: AyuGramSettingsSection, text: String)
+@@ -126,14 +162,14 @@ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+ 
+     var section: ItemListSectionId {
+         switch self {
+-        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _), let .testAIModels(_, section):
++        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _), let .page(_, section, _, _), let .testAIModels(_, section):
+             return section.rawValue
+         }
+     }
+ 
+     var stableId: Int32 {
+         switch self {
+-        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _), let .testAIModels(id, _):
++        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _), let .page(id, _, _, _), let .testAIModels(id, _):
+             return id
+         }
+     }
+@@ -157,6 +193,10 @@ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+             })
+         case let .footer(_, _, text):
+             return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        case let .page(_, _, page, label):
++            return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: page.title, label: label, sectionId: self.section, style: .blocks, action: {
++                arguments.openPage(page)
++            })
+         case .testAIModels:
+             return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: "Проверить скорость моделей", label: "", sectionId: self.section, style: .blocks, action: {
+                 arguments.testAIModels()
+@@ -169,7 +209,7 @@ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+     }
+ }
+ 
+-private func ayuGramSettingsEntries(values: AyuSettingsValues) -> [AyuGramSettingsEntry] {
++private func ayuGramSettingsEntries(values: AyuSettingsValues, page: AyuGramSettingsPage) -> [AyuGramSettingsEntry] {
+     var entries: [AyuGramSettingsEntry] = []
+     var nextId: Int32 = 0
+     func add(_ make: (Int32) -> AyuGramSettingsEntry) {
+@@ -191,74 +231,98 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues) -> [AyuGramSettin
+ 
+     let ghost = values.ghostModeEnabled
+ 
+-    header(.ghost, "РЕЖИМ ПРИЗРАКА")
+-    toggle(.ghost, .ghostMode, "Режим призрака", ghost)
+-    footer(.ghost, "Пока режим включён, сервер не узнаёт о действиях, которые выключены ниже.")
+-
+-    header(.ghostOptions, "ЧТО СКРЫВАТЬ")
+-    toggle(.ghostOptions, .sendReadMessages, "Не читать сообщения", !values.sendReadMessagePackets, enabled: ghost)
+-    toggle(.ghostOptions, .sendReadStories, "Не читать истории", !values.sendReadStoryPackets, enabled: ghost)
+-    toggle(.ghostOptions, .sendOnline, "Не отправлять «в сети»", !values.sendOnlinePackets, enabled: ghost)
+-    toggle(.ghostOptions, .sendTyping, "Не отправлять «печатает»", !values.sendUploadProgress, enabled: ghost)
+-    toggle(.ghostOptions, .sendOfflineAfterOnline, "Автоматический «не в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost)
+-    footer(.ghostOptions, "Включённый пункт скрывает действие от собеседников, пока режим призрака включён. «Автоматический „не в сети“» отправляет «не в сети» сразу после «в сети», а также после ваших сообщений и реакций: сервер сам показывает вас в сети, когда вы что-то отправляете. При сворачивании приложения «не в сети» уходит всегда. Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными, пока вы не откроете этот чат с выключенным режимом.")
++    switch page {
++    case .root:
++        add { .page(id: $0, section: .pages, page: .ghost, label: ghost ? "Вкл" : "Выкл") }
++        add { .page(id: $0, section: .pages, page: .messages, label: "") }
++        add { .page(id: $0, section: .pages, page: .interface, label: "") }
++        add { .page(id: $0, section: .pages, page: .ai, label: values.aiEnabled ? "Вкл" : "Выкл") }
++        add { .page(id: $0, section: .pages, page: .other, label: "") }
++        footer(.pages, "Режим призрака — что скрывать от собеседников. Сообщения — сохранение удалённых, история правок, отправка без звука и автоотправка. Интерфейс — реклама, истории, числа, время и ID. Нейросеть — Gemini в меню сообщения. Дополнительно — работа в фоне и проверка уведомлений.")
++    case .ghost:
++        header(.ghost, "РЕЖИМ ПРИЗРАКА")
++        toggle(.ghost, .ghostMode, "Режим призрака", ghost)
++        footer(.ghost, "Пока режим включён, сервер не узнаёт о действиях, которые выключены ниже.")
+ 
+-    toggle(.ghostExtras, .markReadAfterAction, "Читать при действиях", values.markReadAfterAction, enabled: ghost)
+-    toggle(.ghostExtras, .suggestGhostForStories, "Предлагать призрака для историй", values.suggestGhostModeBeforeViewingStory)
+-    toggle(.ghostExtras, .ghostStatusInChatList, "Статус призрака в списке чатов", values.displayGhostStatus)
+-    footer(.ghostExtras, "«Читать при действиях» отмечает чат прочитанным, когда вы отправляете в него сообщение или реакцию. Перед открытием историй можно получить предложение включить режим призрака. Статус призрака — 👻 рядом с заголовком «Чаты».")
++        header(.ghostOptions, "ЧТО СКРЫВАТЬ")
++        toggle(.ghostOptions, .sendReadMessages, "Не читать сообщения", !values.sendReadMessagePackets, enabled: ghost)
++        toggle(.ghostOptions, .sendReadStories, "Не читать истории", !values.sendReadStoryPackets, enabled: ghost)
++        toggle(.ghostOptions, .sendOnline, "Не отправлять «в сети»", !values.sendOnlinePackets, enabled: ghost)
++        toggle(.ghostOptions, .sendTyping, "Не отправлять «печатает»", !values.sendUploadProgress, enabled: ghost)
++        toggle(.ghostOptions, .sendOfflineAfterOnline, "Автоматический «не в сети»", values.sendOfflinePacketAfterOnline, enabled: ghost)
++        footer(.ghostOptions, "Включённый пункт скрывает действие от собеседников, пока режим призрака включён. «Автоматический „не в сети“» отправляет «не в сети» сразу после «в сети», а также после ваших сообщений и реакций: сервер сам показывает вас в сети, когда вы что-то отправляете. При сворачивании приложения «не в сети» уходит всегда. Сообщения, прочитанные в режиме призрака, у собеседника остаются непрочитанными, пока вы не откроете этот чат с выключенным режимом.")
+ 
+-    header(.sendWithoutSound, "ОТПРАВЛЯТЬ БЕЗ ЗВУКА")
+-    choice(.sendWithoutSound, .sendWithoutSound(.never), "Никогда", values.sendWithoutSound == .never)
+-    choice(.sendWithoutSound, .sendWithoutSound(.always), "Всегда", values.sendWithoutSound == .always)
+-    choice(.sendWithoutSound, .sendWithoutSound(.inGhostMode), "В режиме призрака", values.sendWithoutSound == .inGhostMode)
++        toggle(.ghostExtras, .markReadAfterAction, "Читать при действиях", values.markReadAfterAction, enabled: ghost)
++        toggle(.ghostExtras, .suggestGhostForStories, "Предлагать призрака для историй", values.suggestGhostModeBeforeViewingStory)
++        toggle(.ghostExtras, .ghostStatusInChatList, "Статус призрака в списке чатов", values.displayGhostStatus)
++        footer(.ghostExtras, "«Читать при действиях» отмечает чат прочитанным, когда вы отправляете в него сообщение или реакцию. Перед открытием историй можно получить предложение включить режим призрака. Статус призрака — 👻 рядом с заголовком «Чаты».")
++    case .messages:
++        header(.saving, "СОХРАНЕНИЕ СООБЩЕНИЙ")
++        toggle(.saving, .saveDeleted, "Сохранять удалённые", values.saveDeletedMessages)
++        toggle(.saving, .saveHistory, "Сохранять историю правок", values.saveMessagesHistory)
++        toggle(.saving, .semiTransparent, "Полупрозрачные удалённые", values.semiTransparentDeletedMessages)
++        footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑. Их список открывается долгим нажатием на аватарку чата → «Удалённые сообщения». История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить; «Держать в фоне» (в «Дополнительно») помогает получать их в свёрнутом приложении.")
+ 
+-    header(.saving, "СОХРАНЕНИЕ СООБЩЕНИЙ")
+-    toggle(.saving, .saveDeleted, "Сохранять удалённые", values.saveDeletedMessages)
+-    toggle(.saving, .saveHistory, "Сохранять историю правок", values.saveMessagesHistory)
+-    toggle(.saving, .semiTransparent, "Полупрозрачные удалённые", values.semiTransparentDeletedMessages)
+-    toggle(.saving, .keepAlive, "Держать в фоне", values.keepAliveInBackground)
+-    footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑. Их список открывается долгим нажатием на аватарку чата → «Удалённые сообщения». История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить. «Держать в фоне» не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи). Закрытое смахиванием приложение не работает.")
++        header(.sendWithoutSound, "ОТПРАВЛЯТЬ БЕЗ ЗВУКА")
++        choice(.sendWithoutSound, .sendWithoutSound(.never), "Никогда", values.sendWithoutSound == .never)
++        choice(.sendWithoutSound, .sendWithoutSound(.always), "Всегда", values.sendWithoutSound == .always)
++        choice(.sendWithoutSound, .sendWithoutSound(.inGhostMode), "В режиме призрака", values.sendWithoutSound == .inGhostMode)
+ 
+-    header(.interface, "ИНТЕРФЕЙС")
+-    toggle(.interface, .disableAds, "Блокировать рекламу", values.disableAds)
+-    toggle(.interface, .hideStories, "Скрыть истории", values.hideStories)
+-    toggle(.interface, .disableNumberRounding, "Отключить округление чисел", values.disableNumberRounding)
+-    toggle(.interface, .showMessageSeconds, "Время с секундами", values.showMessageSeconds)
+-    toggle(.interface, .showProfileTab, "Вкладка «Профиль»", values.showProfileTab)
+-    footer(.interface, "Реклама в каналах, в поиске и канал спонсора прокси не загружаются. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек».")
++        header(.autoSend, "АВТООТПРАВКА")
++        toggle(.autoSend, .autoSend, "Автоотправка", values.autoSendEnabled)
++        footer(.autoSend, "В поле ввода перед кнопкой стикеров появится ⚡️. В её меню задаются текст, фото и видео и интервал; шаблон уходит в чат сразу после запуска и затем по таймеру, пока вы его не остановите. Отправка идёт, пока приложение открыто или работает в фоне с «Держать в фоне». Выключение здесь останавливает все запущенные отправки.")
++    case .interface:
++        header(.interface, "ИНТЕРФЕЙС")
++        toggle(.interface, .disableAds, "Блокировать рекламу", values.disableAds)
++        toggle(.interface, .hideStories, "Скрыть истории", values.hideStories)
++        toggle(.interface, .disableNumberRounding, "Отключить округление чисел", values.disableNumberRounding)
++        toggle(.interface, .showMessageSeconds, "Время с секундами", values.showMessageSeconds)
++        toggle(.interface, .showProfileTab, "Вкладка «Профиль»", values.showProfileTab)
++        footer(.interface, "Реклама в каналах, в поиске и канал спонсора прокси не загружаются. Истории убираются из списка чатов и архива; в профиле их по-прежнему можно открыть. Без округления: 1.23K → 1,234. Время сообщений: 12:34 → 12:34:56. Вкладка «Профиль» появляется справа от «Настроек».")
+ 
+-    header(.ai, "НЕЙРОСЕТЬ")
+-    toggle(.ai, .ai, "Нейросеть (Google Gemini)", values.aiEnabled)
+-    if values.aiEnabled {
+-        add { .apiKey(id: $0, section: .ai, text: values.aiApiKey) }
+-    }
+-    footer(.ai, "В меню сообщения появится «Нейросеть»: краткий пересказ или ответ на вопрос из сообщения. Бесплатный ключ: aistudio.google.com → Get API key. Google не работает в России: нужен VPN или SOCKS5-прокси в настройках Telegram (MTProto-прокси не подходит).\n\nВ Google уходит только текст выбранного сообщения. Имена, @юзернеймы, ссылки t.me, номера телефонов, e-mail и длинные числа (ID) заменяются заглушками; имя чата, автор, ваш аккаунт и ID не отправляются. На бесплатном тарифе Google может использовать присланные тексты для улучшения своих моделей, поэтому не отправляйте личное.")
++        header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
++        choice(.peerId, .peerIdFormat(.hidden), "Не показывать", values.peerIdFormat == .hidden)
++        choice(.peerId, .peerIdFormat(.telegramApi), "Telegram API", values.peerIdFormat == .telegramApi)
++        choice(.peerId, .peerIdFormat(.botApi), "Bot API", values.peerIdFormat == .botApi)
++        footer(.peerId, "ID показывается в профиле, нажатие копирует его. Telegram API показывает ID как есть, а Bot API добавляет минус для групп и -100 для супергрупп и каналов. DC — дата-центр фото профиля.")
++    case .ai:
++        header(.ai, "НЕЙРОСЕТЬ")
++        toggle(.ai, .ai, "Нейросеть (Google Gemini)", values.aiEnabled)
++        if values.aiEnabled {
++            add { .apiKey(id: $0, section: .ai, text: values.aiApiKey) }
++        }
++        footer(.ai, "В меню сообщения появится «Нейросеть»: краткий пересказ или ответ на вопрос из сообщения. Бесплатный ключ: aistudio.google.com → Get API key. Google не работает в России: нужен VPN или SOCKS5-прокси в настройках Telegram (MTProto-прокси не подходит).\n\nВ Google уходит только текст выбранного сообщения. Имена, @юзернеймы, ссылки t.me, номера телефонов, e-mail и длинные числа (ID) заменяются заглушками; имя чата, автор, ваш аккаунт и ID не отправляются. На бесплатном тарифе Google может использовать присланные тексты для улучшения своих моделей, поэтому не отправляйте личное.")
+ 
+-    if values.aiEnabled {
+-        header(.aiModel, "МОДЕЛЬ НЕЙРОСЕТИ")
+-        let knownModel = ayuAIModels.contains(where: { $0.id == values.aiModel })
+-        choice(.aiModel, .aiModel(ayuAIAutoModel), "Авто — быстрая для пересказа, точная для задач", !knownModel)
+-        for model in ayuAIModels {
+-            choice(.aiModel, .aiModel(model.id), model.title, values.aiModel == model.id)
++        if values.aiEnabled {
++            header(.aiModel, "МОДЕЛЬ НЕЙРОСЕТИ")
++            let knownModel = ayuAIModels.contains(where: { $0.id == values.aiModel })
++            choice(.aiModel, .aiModel(ayuAIAutoModel), "Авто — быстрая для пересказа, точная для задач", !knownModel)
++            for model in ayuAIModels {
++                choice(.aiModel, .aiModel(model.id), model.title, values.aiModel == model.id)
++            }
++            add { .testAIModels(id: $0, section: .aiModel) }
++            footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее; Pro решает сложные задачи лучше всех, но на бесплатном тарифе у неё маленький лимит. Если модель недоступна, приложение берёт другие, которые Google открыл для вашего ключа. «Проверить скорость» спрашивает все модели сразу и показывает каждую, как только она ответит, — быстрые первыми.")
+         }
+-        add { .testAIModels(id: $0, section: .aiModel) }
+-        footer(.aiModel, "Если выбранная модель перегружена, ответит следующая. Flash-Lite отвечает быстрее всех, Flash — подробнее и точнее; Pro решает сложные задачи лучше всех, но на бесплатном тарифе у неё маленький лимит. Если модель недоступна, приложение берёт другие, которые Google открыл для вашего ключа. «Проверить скорость» спрашивает все модели сразу и показывает каждую, как только она ответит, — быстрые первыми.")
++    case .other:
++        header(.background, "РАБОТА В ФОНЕ")
++        toggle(.background, .keepAlive, "Держать в фоне", values.keepAliveInBackground)
++        footer(.background, "Не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи): соединение остаётся, удаления и правки приходят сразу, автоотправка продолжает работать. Закрытое смахиванием приложение не работает.")
+     }
+ 
+-    header(.peerId, "ПОКАЗЫВАТЬ ID И DC")
+-    choice(.peerId, .peerIdFormat(.hidden), "Не показывать", values.peerIdFormat == .hidden)
+-    choice(.peerId, .peerIdFormat(.telegramApi), "Telegram API", values.peerIdFormat == .telegramApi)
+-    choice(.peerId, .peerIdFormat(.botApi), "Bot API", values.peerIdFormat == .botApi)
+-    footer(.peerId, "ID показывается в профиле, нажатие копирует его. Telegram API показывает ID как есть, а Bot API добавляет минус для групп и -100 для супергрупп и каналов. DC — дата-центр фото профиля.")
+-
+     return entries
+ }
+ 
+ public func ayuGramSettingsController(context: AccountContext) -> ViewController {
++    return ayuGramSettingsPageController(context: context, page: .root)
++}
++
++private func ayuGramSettingsPageController(context: AccountContext, page: AyuGramSettingsPage) -> ViewController {
++    var pushControllerImpl: ((ViewController) -> Void)?
+     var windowImpl: (() -> UIWindow?)?
+     let arguments = AyuGramSettingsControllerArguments(update: { f in
+         AyuSettings.shared.update(f)
++    }, openPage: { page in
++        pushControllerImpl?(ayuGramSettingsPageController(context: context, page: page))
+     }, testAIModels: {
+         ayuAIPresentSpeedTest(context: context, window: windowImpl?())
+     })
+@@ -268,12 +332,15 @@ public func ayuGramSettingsController(context: AccountContext) -> ViewController
+         AyuSettings.shared.signal
+     )
+     |> map { presentationData, values -> (ItemListControllerState, (ItemListNodeState, Any)) in
+-        let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text("AyuGram"), leftNavigationButton: nil, rightNavigationButton: nil, backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back))
+-        let listState = ItemListNodeState(presentationData: ItemListPresentationData(presentationData), entries: ayuGramSettingsEntries(values: values), style: .blocks, animateChanges: true)
++        let controllerState = ItemListControllerState(presentationData: ItemListPresentationData(presentationData), title: .text(page.title), leftNavigationButton: nil, rightNavigationButton: nil, backNavigationButton: ItemListBackButton(title: presentationData.strings.Common_Back))
++        let listState = ItemListNodeState(presentationData: ItemListPresentationData(presentationData), entries: ayuGramSettingsEntries(values: values, page: page), style: .blocks, animateChanges: true)
+         return (controllerState, (listState, arguments))
+     }
+ 
+     let controller = ItemListController(context: context, state: signal)
++    pushControllerImpl = { [weak controller] c in
++        (controller?.navigationController as? NavigationController)?.pushViewController(c)
++    }
+     windowImpl = { [weak controller] in
+         return controller?.view.window
+     }
+diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/BUILD b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/BUILD
+index 4e2d93c..b7707d3 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/BUILD
++++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/BUILD
+@@ -75,6 +75,7 @@ swift_library(
+         "//submodules/TelegramUI/Components/Chat/ChatInputContextPanelNode",
+         "//submodules/TelegramUI/Components/AnimatedTextComponent",
+         "//submodules/TelegramUI/Components/RasterizedCompositionComponent",
++        "//submodules/AyuGram/AyuAutoSend",
+         "//submodules/TelegramUI/Components/StarsParticleEffect",
+         "//submodules/TelegramUI/Components/Calls/VideoChatMicButtonComponent",
+         "//submodules/TelegramUI/Components/RichTextEditor:RichTextEditorUIKit",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift
+index 50859fa..a1ca96f 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift
+@@ -172,12 +172,15 @@ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundVie
+                 return (PresentationResourcesChat.chatInputTextFieldScheduleImage(theme), nil, strings.VoiceOver_ScheduledMessages, 1.0, UIEdgeInsets())
+             case .gift:
+                 return (PresentationResourcesChat.chatInputTextFieldGiftImage(theme), nil, strings.VoiceOver_GiftPremium, 1.0, UIEdgeInsets())
++            case .ayuAutoSend:
++                let image = UIImage(systemName: "bolt", withConfiguration: UIImage.SymbolConfiguration(pointSize: 19.0, weight: .regular))
++                return (generateTintedImage(image: image, color: .white)?.withRenderingMode(.alwaysTemplate), nil, "Автоотправка", 1.0, UIEdgeInsets())
+         }
+     }
+     
+     private static func calculateWidth(item: ChatTextInputAccessoryItem, image: UIImage?, text: String?, strings: PresentationStrings) -> CGFloat {
+         switch item {
+-        case .input, .botInput, .silentPost, .commands, .scheduledMessages, .gift, .suggestPost:
++        case .input, .botInput, .silentPost, .commands, .scheduledMessages, .gift, .suggestPost, .ayuAutoSend:
+             return 32.0
+         case let .messageAutoremoveTimeout(timeout):
+             var imageWidth = (image?.size.width ?? 0.0) + CGFloat(8.0)
+diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+index ec2bc59..a4fcd79 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+@@ -58,6 +58,7 @@ import ChatRecordingViewOnceButtonNode
+ import ChatRecordingPreviewInputPanelNode
+ import ChatInputContextPanelNode
+ import RasterizedCompositionComponent
++import AyuAutoSend
+ import RichTextEditorUIKit
+ import RichTextEditorCore
+ 
+@@ -6023,6 +6024,11 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
+                     self.interfaceInteraction?.openPremiumGift()
+                 case .suggestPost:
+                     self.interfaceInteraction?.openSuggestPost(nil, .default)
++                case .ayuAutoSend:
++                    if let context = self.context, let chatLocation = self.presentationInterfaceState?.chatLocation, let peerId = chatLocation.peerId {
++                        self.view.window?.endEditing(true)
++                        self.interfaceInteraction?.getNavigationController()?.pushViewController(ayuAutoSendController(context: context, peerId: peerId, threadId: chatLocation.threadId))
++                    }
+                 }
+                 break
+             }
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift b/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift
+index 90e5bf1..c53dcda 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift
+@@ -10,6 +10,7 @@ import SwiftSignalKit
+ import TextFormat
+ import ChatContextQuery
+ import ChatTextInputPanelNode
++import AyuGramSettings
+ 
+ func serviceTasksForChatPresentationIntefaceState(context: AccountContext, chatPresentationInterfaceState: ChatPresentationInterfaceState, updateState: @escaping ((ChatPresentationInterfaceState) -> ChatPresentationInterfaceState) -> Void) -> [AnyHashable: () -> Disposable] {
+     // Read the STRUCTURAL model, not the derived `inputText`: the flat projection drops whole blocks
+@@ -253,6 +254,14 @@ func inputTextPanelStateForChatPresentationInterfaceState(_ chatPresentationInte
+                     accessoryItems.append(.commands)
+                 }
+                 
++                // AyuGram: the auto-send button, just before the stickers button.
++                if AyuSettings.shared.values.autoSendEnabled && canSendTextMessages && !hasForward && chatPresentationInterfaceState.chatLocation.peerId != nil {
++                    if case .scheduledMessages = chatPresentationInterfaceState.subject {
++                    } else {
++                        accessoryItems.append(.ayuAutoSend)
++                    }
++                }
++                
+                 if !canSendTextMessages {
+                     if stickersEnabled && !stickersAreEmoji && !hasForward {
+                         accessoryItems.append(.input(isEnabled: true, inputMode: .stickers))
