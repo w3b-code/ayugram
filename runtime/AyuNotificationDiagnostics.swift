@@ -7,7 +7,7 @@ public enum AyuNotificationDiagnostics {
     public enum Phase: String, Codable {
         case received, keyMatched, keyNotFound, databaseUnavailable, keyUnavailable
         case decryptionFailed, decrypted, waitingForNetwork, networkTimeout
-        case payloadFallback, delivered, initializationFailed, expired, servicePush
+        case payloadFallback, delivered, initializationFailed, expired, servicePush, targetedFetch
 
         var failure: Bool {
             switch self {
@@ -34,6 +34,7 @@ public enum AyuNotificationDiagnostics {
             case .initializationFailed: return "Не удалось запустить обработчик push"
             case .expired: return "iOS завершила обработчик по тайм-ауту"
             case .servicePush: return "Служебный push обработан без нового сообщения"
+            case .targetedFetch: return "Загрузка сообщения из push без полной синхронизации"
             }
         }
     }
@@ -46,6 +47,7 @@ public enum AyuNotificationDiagnostics {
         var messageBodyPresent: Bool?
         var privacyHidden: Bool?
         var servicePush: Bool?
+        var processingSeconds: TimeInterval?
     }
     private static let lock = NSLock()
 
@@ -64,7 +66,7 @@ public enum AyuNotificationDiagnostics {
         return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupIdentifier)
     }
 
-    static func write(_ phase: Phase, to url: URL, hasBody: Bool? = nil, privacyHidden: Bool? = nil) {
+    static func write(_ phase: Phase, to url: URL, hasBody: Bool? = nil, privacyHidden: Bool? = nil, processingSeconds: TimeInterval? = nil, timestamp: TimeInterval = Date().timeIntervalSince1970) {
         self.lock.lock()
         defer { self.lock.unlock() }
         var state = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(State.self, from: $0) }
@@ -75,20 +77,22 @@ public enum AyuNotificationDiagnostics {
             state.messageBodyPresent = nil
             state.privacyHidden = nil
             state.servicePush = nil
+            state.processingSeconds = nil
         }
         if phase == .servicePush { state.servicePush = true }
         if phase == .payloadFallback { state.usedPayloadFallback = true }
         if let hasBody { state.messageBodyPresent = hasBody }
         if let privacyHidden { state.privacyHidden = privacyHidden }
+        if let processingSeconds { state.processingSeconds = max(0, processingSeconds) }
         state.phase = phase
-        state.timestamp = Date().timeIntervalSince1970
+        state.timestamp = timestamp
         if phase.failure { state.failure = phase }
         if let data = try? JSONEncoder().encode(state) { try? data.write(to: url, options: .atomic) }
     }
 
-    public static func record(_ phase: Phase, hasBody: Bool? = nil, privacyHidden: Bool? = nil) {
+    public static func record(_ phase: Phase, hasBody: Bool? = nil, privacyHidden: Bool? = nil, processingSeconds: TimeInterval? = nil) {
         guard let container else { return }
-        write(phase, to: container.appendingPathComponent("ayu-notification-status.json"), hasBody: hasBody, privacyHidden: privacyHidden)
+        write(phase, to: container.appendingPathComponent("ayu-notification-status.json"), hasBody: hasBody, privacyHidden: privacyHidden, processingSeconds: processingSeconds)
     }
 
     public static func report() -> String {
@@ -125,6 +129,9 @@ public enum AyuNotificationDiagnostics {
         if let data = try? Data(contentsOf: path), let state = try? JSONDecoder().decode(State.self, from: data) {
             lines.append("Последний этап: " + state.phase.description)
             lines.append("Время: " + DateFormatter.localizedString(from: Date(timeIntervalSince1970: state.timestamp), dateStyle: .short, timeStyle: .medium))
+            if let seconds = state.processingSeconds {
+                lines.append(String(format: "Обработка push: %.2f с", seconds))
+            }
             if let failure = state.failure { lines.append("Последняя ошибка: " + failure.description) }
             if state.usedPayloadFallback { lines.append("Использован резервный текст из push") }
             if state.servicePush == true { lines.append("Тип push: служебная синхронизация") }
@@ -159,6 +166,18 @@ public enum AyuNotificationDiagnostics {
         }
     }
 #endif
+
+    static func canFetchMessageDirectly(_ payload: [String: Any]) -> Bool {
+        guard alert(from: payload) != nil, payload["attachb64"] == nil,
+              payload["r"] == nil, payload["react_emoji"] == nil,
+              let id = payload["msg_id"] as? String, let messageId = Int32(id), messageId > 0,
+              ["from_id", "chat_id", "channel_id"].contains(where: { key in
+                  (payload[key] as? String).flatMap(Int64.init) != nil
+              }), let aps = payload["aps"] as? [String: Any],
+              aps["r"] == nil, aps["react_emoji"] == nil,
+              !["t", "st", "str"].contains(aps["category"] as? String ?? "") else { return false }
+        return true
+    }
 
     static func alert(from payload: [String: Any]) -> (title: String?, subtitle: String?, body: String)? {
         guard payload["loc-key"] == nil, payload["story_id"] == nil, payload["call_id"] == nil, payload["encryption_id"] == nil,
