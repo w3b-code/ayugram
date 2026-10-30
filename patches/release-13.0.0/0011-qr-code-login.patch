@@ -1,0 +1,125 @@
+diff --git a/submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift b/submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift
+index e442230..c9c74ca 100644
+--- a/submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift
++++ b/submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift
+@@ -322,6 +322,10 @@ final class AuthorizationSequencePhoneEntryControllerNode: ASDisplayNode {
+     private let proceedNode: SolidRoundedButtonNode
+     
+     private var qrNode: ASImageNode?
++    /// AyuGram: signing in by scanning a QR code on a device where the account is open, without an SMS.
++    private var ayuQrButton: UIButton?
++    private var ayuQrOverlay: UIView?
++    private var ayuQrImageView: UIImageView?
+     private let exportTokenDisposable = MetaDisposable()
+     private let tokenEventsDisposable = MetaDisposable()
+     var accountUpdated: ((UnauthorizedAccount) -> Void)?
+@@ -507,6 +511,16 @@ final class AuthorizationSequencePhoneEntryControllerNode: ASDisplayNode {
+         super.didLoad()
+         
+         self.titleNode.view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.debugTap(_:))))
++        
++        if self.account != nil {
++            let qrButton = UIButton(type: .system)
++            qrButton.setTitle("Войти по QR-коду", for: .normal)
++            qrButton.titleLabel?.font = UIFont.systemFont(ofSize: 17.0)
++            qrButton.setTitleColor(self.theme.list.itemAccentColor, for: .normal)
++            qrButton.addTarget(self, action: #selector(self.ayuQrButtonPressed), for: .touchUpInside)
++            self.view.addSubview(qrButton)
++            self.ayuQrButton = qrButton
++        }
+         #if DEBUG && false
+         self.noticeNode.view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.debugQrTap(_:))))
+         #endif
+@@ -659,6 +673,11 @@ final class AuthorizationSequencePhoneEntryControllerNode: ASDisplayNode {
+         
+         transition.updateFrame(node: self.proceedNode, frame: buttonFrame)
+         
++        if let ayuQrButton = self.ayuQrButton {
++            ayuQrButton.isHidden = self.proceedNode.isHidden
++            ayuQrButton.frame = CGRect(x: buttonFrame.minX, y: buttonFrame.minY - 52.0, width: buttonFrame.width, height: 44.0)
++        }
++        
+         self.animationNode.updateLayout(size: animationSize)
+         
+         let _ = layoutAuthorizationItems(bounds: CGRect(origin: CGPoint(x: 0.0, y: insets.top), size: CGSize(width: layout.size.width, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset)), items: items, transition: transition, failIfDoesNotFit: false)
+@@ -701,6 +720,72 @@ final class AuthorizationSequencePhoneEntryControllerNode: ASDisplayNode {
+         }
+     }
+     
++    @objc private func ayuQrButtonPressed() {
++        guard self.ayuQrOverlay == nil else {
++            return
++        }
++        self.view.endEditing(true)
++        
++        let overlay = UIView(frame: self.view.bounds)
++        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
++        overlay.backgroundColor = self.theme.list.plainBackgroundColor
++        
++        let titleLabel = UILabel()
++        titleLabel.text = "Вход по QR-коду"
++        titleLabel.font = UIFont.boldSystemFont(ofSize: 24.0)
++        titleLabel.textColor = self.theme.list.itemPrimaryTextColor
++        
++        let imageView = UIImageView()
++        imageView.backgroundColor = .white
++        imageView.contentMode = .center
++        imageView.layer.cornerRadius = 12.0
++        imageView.clipsToBounds = true
++        imageView.translatesAutoresizingMaskIntoConstraints = false
++        
++        let hintLabel = UILabel()
++        hintLabel.numberOfLines = 0
++        hintLabel.textAlignment = .center
++        hintLabel.font = UIFont.systemFont(ofSize: 16.0)
++        hintLabel.textColor = self.theme.list.itemSecondaryTextColor
++        hintLabel.text = "Откройте Telegram на устройстве, где вы уже вошли в этот аккаунт: Настройки → Устройства → «Подключить устройство», и отсканируйте код. SMS не понадобится. Если включён облачный пароль, его попросят ввести здесь."
++        hintLabel.translatesAutoresizingMaskIntoConstraints = false
++        
++        let cancelButton = UIButton(type: .system)
++        cancelButton.setTitle("Ввести номер телефона", for: .normal)
++        cancelButton.titleLabel?.font = UIFont.systemFont(ofSize: 17.0)
++        cancelButton.setTitleColor(self.theme.list.itemAccentColor, for: .normal)
++        cancelButton.addTarget(self, action: #selector(self.ayuQrCancelPressed), for: .touchUpInside)
++        
++        let stack = UIStackView(arrangedSubviews: [titleLabel, imageView, hintLabel, cancelButton])
++        stack.axis = .vertical
++        stack.alignment = .center
++        stack.spacing = 20.0
++        stack.translatesAutoresizingMaskIntoConstraints = false
++        overlay.addSubview(stack)
++        NSLayoutConstraint.activate([
++            imageView.widthAnchor.constraint(equalToConstant: 232.0),
++            imageView.heightAnchor.constraint(equalToConstant: 232.0),
++            hintLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 320.0),
++            stack.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
++            stack.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
++            stack.leadingAnchor.constraint(greaterThanOrEqualTo: overlay.leadingAnchor, constant: 24.0),
++            stack.trailingAnchor.constraint(lessThanOrEqualTo: overlay.trailingAnchor, constant: -24.0)
++        ])
++        
++        self.view.addSubview(overlay)
++        self.ayuQrOverlay = overlay
++        self.ayuQrImageView = imageView
++        // The code renews itself when it expires; a scan signs this app in through the usual flow.
++        self.refreshQrToken()
++    }
++    
++    @objc private func ayuQrCancelPressed() {
++        self.exportTokenDisposable.set(nil)
++        self.ayuQrOverlay?.removeFromSuperview()
++        self.ayuQrOverlay = nil
++        self.ayuQrImageView = nil
++    }
++    
+     @objc private func debugQrTap(_ recognizer: UITapGestureRecognizer) {
+         if self.qrNode == nil {
+             let qrNode = ASImageNode()
+@@ -752,6 +837,7 @@ final class AuthorizationSequencePhoneEntryControllerNode: ASDisplayNode {
+                     let context = generate(TransformImageArguments(corners: ImageCorners(), imageSize: CGSize(width: 200.0, height: 200.0), boundingSize: CGSize(width: 200.0, height: 200.0), intrinsicInsets: UIEdgeInsets()))
+                     if let image = context?.generateImage() {
+                         strongSelf.qrNode?.image = image
++                        strongSelf.ayuQrImageView?.image = image
+                     }
+                 })
+                 
