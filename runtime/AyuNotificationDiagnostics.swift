@@ -56,7 +56,8 @@ public enum AyuNotificationDiagnostics {
     }
 
     private static var groupIdentifier: String {
-        return groupIdentifier(bundleIdentifier: Bundle.main.bundleIdentifier ?? "ph.telegra.Telegraph", isExtension: Bundle.main.bundlePath.hasSuffix(".appex"), override: Bundle.main.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String)
+        let fallback = groupIdentifier(bundleIdentifier: Bundle.main.bundleIdentifier ?? "ph.telegra.Telegraph", isExtension: Bundle.main.bundlePath.hasSuffix(".appex"), override: nil)
+        return AyuAppGroupResolver.groupIdentifier(configured: Bundle.main.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String, fallback: fallback)
     }
 
     private static var container: URL? {
@@ -93,8 +94,23 @@ public enum AyuNotificationDiagnostics {
     public static func report() -> String {
         let fm = FileManager.default
         var lines = ["Сборка: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")", "App Group: \(groupIdentifier)"]
+        if let configured = Bundle.main.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String, configured != groupIdentifier {
+            lines.append("Группа в сборке: " + configured)
+        }
+        for (name, groups) in [("приложения", AyuAppGroupResolver.mainGroups), ("расширения", AyuAppGroupResolver.serviceGroups)] {
+            if let groups {
+                lines.append("App Groups в подписи " + name + ": " + (groups.isEmpty ? "отсутствуют" : groups.joined(separator: ", ")))
+            } else {
+                lines.append("App Groups в подписи " + name + ": не удалось прочитать")
+            }
+        }
+        let plugins = Bundle.main.builtInPlugInsURL.flatMap { try? fm.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) } ?? []
+        let service = plugins.compactMap { Bundle(url: $0) }.first { bundle in
+            return (bundle.object(forInfoDictionaryKey: "NSExtension") as? [String: Any])?["NSExtensionPointIdentifier"] as? String == "com.apple.usernotifications.service"
+        }
+        lines.append(service == nil ? "Расширение уведомлений: отсутствует после подписи" : "Расширение уведомлений: установлено")
         guard let container else {
-            return (lines + ["Общая папка недоступна. Проверьте App Groups после подписи в Feather."]).joined(separator: "\n")
+            return (lines + ["Общая папка недоступна. Профиль и подпись приложения и NotificationService должны разрешать одну общую App Group. Одной переменной GitHub для выдачи этих прав недостаточно."]).joined(separator: "\n")
         }
         let probe = container.appendingPathComponent(".ayu-probe-" + UUID().uuidString)
         do {
@@ -102,11 +118,6 @@ public enum AyuNotificationDiagnostics {
             try fm.removeItem(at: probe)
             lines.append("Общая папка: чтение и запись доступны")
         } catch { lines.append("Общая папка: запись недоступна") }
-        let plugins = Bundle.main.builtInPlugInsURL.flatMap { try? fm.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) } ?? []
-        let service = plugins.compactMap { Bundle(url: $0) }.first { bundle in
-            return (bundle.object(forInfoDictionaryKey: "NSExtension") as? [String: Any])?["NSExtensionPointIdentifier"] as? String == "com.apple.usernotifications.service"
-        }
-        lines.append(service == nil ? "Расширение уведомлений: отсутствует после подписи" : "Расширение уведомлений: установлено")
         if let service, service.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String != Bundle.main.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String {
             lines.append("Группы приложения и расширения не совпадают")
         }
