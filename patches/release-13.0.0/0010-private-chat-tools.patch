@@ -133,7 +133,7 @@ index 0000000..4748dbf
 +            if feature == .ai {
 +                // Every start is a clean slate.
 +                self.removeHistory(chatKey)
-+                self.send(context: context, peerId: peerId, text: "🤖 AI-ассистент включён. Сейчас на ваши сообщения отвечает нейросеть; личные данные из них перед отправкой удаляются.", entities: [])
++                self.send(context: context, peerId: peerId, text: "🤖 AI-ассистент включён. Сейчас на ваши сообщения отвечает нейросеть", entities: [])
 +            }
 +        } else {
 +            self.setState(nil, feature, chatKey)
