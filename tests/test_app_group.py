@@ -45,10 +45,13 @@ class AppGroupConfigurationTests(unittest.TestCase):
         helper = self.root / "submodules/TelegramUI/Sources/AyuGram/AyuAppGroupMigration.swift"
         self.assertEqual(helper.read_bytes(), (REPO / "runtime/AyuAppGroupMigration.swift").read_bytes())
 
-    def test_default_does_not_change_sources(self):
-        before = {p: p.read_bytes() for p in self.root.rglob("*.swift")}
-        self.assertEqual(app_group.configure(self.root, ""), 0)
-        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob("*.swift")})
+    def test_default_resolves_signed_groups_without_a_hardcoded_override(self):
+        self.assertEqual(app_group.configure(self.root, ""), 10)
+        self.assertNotIn('<key>AyuGramAppGroup</key>', (self.root / 'Telegram/BUILD').read_text())
+        for relative in app_group.SOURCES:
+            path = self.root / relative
+            self.assertIn(app_group.LOOKUP, path.read_text())
+            self.assertEqual((path.parent / 'AyuAppGroupResolver.swift').read_bytes(), (REPO / 'runtime/AyuAppGroupResolver.swift').read_bytes())
 
     def test_invalid_group_rejected_before_writing(self):
         for group in ('group.*', 'group.example"', 'group.example\n', 'example.group', 'group.'):
@@ -85,7 +88,7 @@ func groupForExtension(_ appBundleIdentifier: String) -> String? {
     return appGroupName
 }
 ''')
-        subprocess.run(["swiftc", "-warnings-as-errors", "-typecheck", str(source)], check=True)
+        subprocess.run(["swiftc", "-warnings-as-errors", "-typecheck", str(REPO / 'runtime/AyuAppGroupResolver.swift'), str(source)], check=True)
 
 
 if __name__ == "__main__":
