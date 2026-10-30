@@ -254,7 +254,8 @@ def configure(root: Path):
             })
         case .testAIModels:
 ''')
-    screen = replace_once(screen, '    return entries\n}', '    header(.notifications, "УВЕДОМЛЕНИЯ")\n    add { .notificationDiagnostics(id: $0, section: .notifications) }\n    footer(.notifications, "Проверяет доступ к общей папке и последний этап обработки push. Текст сообщений и ключи в проверку не записываются.")\n\n    return entries\n}')
+    # The check belongs to the "Other" group of the settings screen.
+    screen = replace_once(screen, '    return entries\n}', '    if page == .other {\n        header(.notifications, "УВЕДОМЛЕНИЯ")\n        add { .notificationDiagnostics(id: $0, section: .notifications) }\n        footer(.notifications, "Проверяет доступ к общей папке и последний этап обработки push. Текст сообщений и ключи в проверку не записываются.")\n    }\n\n    return entries\n}')
     screen = replace_once(screen, '    var windowImpl: (() -> UIWindow?)?', '    var windowImpl: (() -> UIWindow?)?\n    var presentControllerImpl: ((ViewController) -> Void)?')
     screen = replace_once(screen, '        ayuAIPresentSpeedTest(context: context, window: windowImpl?())\n    })', '''        ayuAIPresentSpeedTest(context: context, window: windowImpl?())
     }, notificationDiagnostics: {
