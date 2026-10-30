@@ -13,6 +13,8 @@ def replace_once(source, old, new):
 def configure(root: Path):
     service = root / 'Telegram/NotificationService/Sources/NotificationService.swift'
     source = service.read_text()
+    source = replace_once(source, '    private let pollDisposable = MetaDisposable()', '    private let pollDisposable = MetaDisposable()\n    private let ayuDeliveryReportDisposable = MetaDisposable()')
+    source = replace_once(source, '        self.pollDisposable.dispose()', '        self.ayuDeliveryReportDisposable.dispose()\n        self.pollDisposable.dispose()')
     source = replace_once(source, '            var recordId: AccountRecordId?\n', '            var recordId: AccountRecordId?\n            var backupNotificationKey: MasterNotificationKey?\n')
     source = replace_once(source, '                                    recordId = listRecord.id\n', '''                                    recordId = listRecord.id
                                     if let keyData = backupData.data?.notificationEncryptionKey {
@@ -115,6 +117,50 @@ def configure(root: Path):
         source = replace_once(source, old, 'AyuNotificationDiagnostics.record(.'+phase+')\n'+indent+old)
     source = replace_once(source, '                            Logger.shared.log("NotificationService \\(episode)", "Will poll")', '                            AyuNotificationDiagnostics.record(.waitingForNetwork)\n                            Logger.shared.log("NotificationService \\(episode)", "Will poll")')
     source = replace_once(source, '                                            let _ = connectionGaveUp.swap(true)', '                                            AyuNotificationDiagnostics.record(.networkTimeout)\n                                            let _ = connectionGaveUp.swap(true)')
+    source = replace_once(source, '                                let pollSignal: Signal<Never, NoError>', '''                                let usesTargetedFetch = messageId != nil && AyuNotificationDiagnostics.canFetchMessageDirectly(payloadJson)
+                                let pollSignal: Signal<Never, NoError>''')
+    source = replace_once(source, '                                    let unboundedPollSignal: Signal<Never, NoError>', '                                    var unboundedPollSignal: Signal<Never, NoError>')
+    targeted_poll_anchor = '                                    // `timeout` disposes the poll when it fires, which stops the'
+    source = replace_once(source, targeted_poll_anchor, '''                                    if usesTargetedFetch, let messageId {
+                                        let fullPoll = unboundedPollSignal
+                                        AyuNotificationDiagnostics.record(.targetedFetch)
+                                        // Persist the message before delivery so saving deleted messages
+                                        // continues to work even while the app is in the background.
+                                        unboundedPollSignal = ayuLoadNotificationMessage(postbox: stateManager.postbox, network: stateManager.network, accountPeerId: stateManager.accountPeerId, id: messageId)
+                                        |> mapToSignal { loaded -> Signal<Never, NoError> in
+                                            return loaded ? .complete() : fullPoll
+                                        }
+                                    }
+
+''' + targeted_poll_anchor)
+    delivery = '''                                    reportDeliverySignal = _internal_reportMessageDelivery(postbox: stateManager.postbox, network: stateManager.network, messageIds: [messageId], fromPushNotification: true)
+                                    |> timeout(remainingBudget(), queue: queue, alternate: .single(true))'''
+    source = replace_once(source, delivery, '''                                    let delivery = _internal_reportMessageDelivery(postbox: stateManager.postbox, network: stateManager.network, messageIds: [messageId], fromPushNotification: true)
+                                    |> timeout(remainingBudget(), queue: queue, alternate: .single(true))
+                                    if usesTargetedFetch {
+                                        // Best-effort receipt runs in parallel; its network round trip
+                                        // must not hold an already saved message's notification back.
+                                        strongSelf.ayuDeliveryReportDisposable.set(delivery.start())
+                                        reportDeliverySignal = .single(true)
+                                    } else {
+                                        reportDeliverySignal = delivery
+                                    }''')
+    source = replace_once(source, '                                            return (content, parsedMedia)', '''                                            if usesTargetedFetch, let messageId {
+                                                var suppress = false
+                                                if transaction.getMessage(messageId)?.ayuDeletedAttribute != nil {
+                                                    suppress = true
+                                                }
+                                                if let state = transaction.getCombinedPeerReadState(messageId.peerId)?.states.first(where: { $0.0 == messageId.namespace })?.1,
+                                                   case let .idBased(maxRead, _, _, _, _) = state, maxRead >= messageId.id {
+                                                    suppress = true
+                                                }
+                                                if suppress {
+                                                    content = NotificationContent(isLockedMessage: nil)
+                                                    parsedMedia = nil
+                                                }
+                                            }
+                                            updateCurrentContent(content)
+                                            return (content, parsedMedia)''')
     source = replace_once(source, '                                        return (content, nil)\n                                    }\n                                    |> then(', '''                                        if let messageId, _internal_getMessageNotificationWasDisplayed(transaction: transaction, id: messageId) {
                                             content = NotificationContent(isLockedMessage: nil)
                                         }
@@ -122,7 +168,7 @@ def configure(root: Path):
                                         return (content, nil)
                                     }
                                     |> then(''')
-    source = replace_once(source, '        self.initialContent = request.content', '        AyuNotificationDiagnostics.record(.received)\n        let _ = self.content.swap(nil)\n        self.initialContent = request.content')
+    source = replace_once(source, '        self.initialContent = request.content', '        let processingStarted = ProcessInfo.processInfo.systemUptime\n        AyuNotificationDiagnostics.record(.received)\n        let _ = self.content.swap(nil)\n        self.initialContent = request.content')
     source = replace_once(source, '            return BoxedNotificationServiceHandler(value: NotificationServiceHandler(', '            let handler = NotificationServiceHandler(')
     source = replace_once(source, '                payload: request.content.userInfo\n            ))', '''                payload: request.content.userInfo
             )
@@ -133,9 +179,9 @@ def configure(root: Path):
             }
             return BoxedNotificationServiceHandler(value: handler)''')
     source = replace_once(source, '                            contentHandler(content.generate())', '''                            let rendered = content.generate()
-                            AyuNotificationDiagnostics.record(.delivered, hasBody: !rendered.body.isEmpty)
+                            AyuNotificationDiagnostics.record(.delivered, hasBody: !rendered.body.isEmpty, processingSeconds: ProcessInfo.processInfo.systemUptime - processingStarted)
                             contentHandler(rendered)''')
-    source = replace_once(source, '                            contentHandler(initialContent)', '                            AyuNotificationDiagnostics.record(.delivered, hasBody: !initialContent.body.isEmpty)\n                            contentHandler(initialContent)')
+    source = replace_once(source, '                            contentHandler(initialContent)', '                            AyuNotificationDiagnostics.record(.delivered, hasBody: !initialContent.body.isEmpty, processingSeconds: ProcessInfo.processInfo.systemUptime - processingStarted)\n                            contentHandler(initialContent)')
     source = replace_once(source, '    override func serviceExtensionTimeWillExpire() {', '    override func serviceExtensionTimeWillExpire() {\n        AyuNotificationDiagnostics.record(.expired)')
 
     settings = root / 'submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift'
