@@ -1,6 +1,6 @@
 # AyuGram для iOS
 
-Ветка **ios** — версия для iPhone. [Обзор репозитория](https://github.com/w3b-code/ayugram/tree/main) · [Версия для Windows](https://github.com/w3b-code/ayugram/tree/desktop).
+Версия для iPhone. Ветки `main` и `ios` содержат одно и то же; сборка идёт из `ios`.
 
 В Actions выберите **Build AyuGram iOS**. Workflow всегда собирает содержимое ветки `ios`.
 
