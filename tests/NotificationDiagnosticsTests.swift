@@ -40,6 +40,25 @@ struct NotificationDiagnosticsTests {
         for payload in ordinaryPushes {
             precondition(!Diagnostics.isServicePayload(payload))
         }
+        // The desktop no-delay option has different scheduling rules; on iOS the
+        // fast path targets only normal message pushes and still stores their data.
+        for peer in ["from_id", "chat_id", "channel_id"] {
+            var push: [String: Any] = [peer: "42", "msg_id": "11", "aps": ["alert": ["title": "Sender", "body": "Message"]]]
+            precondition(Diagnostics.canFetchMessageDirectly(push))
+            for field in ["attachb64", "story_id", "call_id", "encryption_id", "r", "react_emoji", "loc-key"] {
+                var special = push
+                special[field] = "1"
+                precondition(!Diagnostics.canFetchMessageDirectly(special))
+            }
+            for category in ["t", "st", "str"] {
+                push["aps"] = ["category": category, "alert": "Reaction"]
+                precondition(!Diagnostics.canFetchMessageDirectly(push))
+            }
+            push["aps"] = ["alert": "Message", "react_emoji": "👍"]
+            precondition(!Diagnostics.canFetchMessageDirectly(push))
+        }
+        precondition(!Diagnostics.canFetchMessageDirectly(["msg_id": "11", "aps": ["alert": "No peer"]]))
+        precondition(!Diagnostics.canFetchMessageDirectly(["from_id": "42", "msg_id": "invalid", "aps": ["alert": "Message"]]))
 
 #if canImport(UserNotifications)
         let service = UNMutableNotificationContent()
@@ -75,7 +94,7 @@ struct NotificationDiagnosticsTests {
         var record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
         precondition(record["failure"] as? String == "decryptionFailed")
         precondition(record["phase"] as? String == "delivered")
-        precondition(Set(record.keys).isSubset(of: ["phase", "failure", "timestamp", "usedPayloadFallback", "messageBodyPresent", "privacyHidden", "servicePush"]))
+        precondition(Set(record.keys).isSubset(of: ["phase", "failure", "timestamp", "usedPayloadFallback", "messageBodyPresent", "privacyHidden", "servicePush", "processingSeconds"]))
         let statusText = String(data: try Data(contentsOf: file), encoding: .utf8)!
         precondition(!statusText.contains("Private message"))
 
@@ -96,6 +115,15 @@ struct NotificationDiagnosticsTests {
         Diagnostics.write(.received, to: file)
         record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
         precondition(record["servicePush"] == nil)
+        Diagnostics.write(.received, to: file, timestamp: 100)
+        Diagnostics.write(.targetedFetch, to: file, timestamp: 100.1)
+        Diagnostics.write(.delivered, to: file, hasBody: true, processingSeconds: 0.2, timestamp: 100.2)
+        record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        precondition(record["processingSeconds"] as? Double == 0.2)
+        precondition(record["timestamp"] as? Double == 100.2)
+        Diagnostics.write(.received, to: file, timestamp: 200)
+        record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        precondition(record["processingSeconds"] == nil)
         print("Notification payload and diagnostics checks passed")
     }
 }
