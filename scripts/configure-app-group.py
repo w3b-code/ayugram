@@ -19,7 +19,7 @@ SOURCES = {
     "submodules/WidgetItems/Sources/WidgetItems.swift": 1,
 }
 ORIGINAL = r'"group.\(baseAppBundleId)"'
-LOOKUP = '(Bundle.main.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String) ?? ' + ORIGINAL
+LOOKUP = 'AyuAppGroupResolver.groupIdentifier(configured: Bundle.main.object(forInfoDictionaryKey: "AyuGramAppGroup") as? String, fallback: ' + ORIGINAL + ')'
 PLIST_ANCHOR = '''    name = "AppNameInfoPlist",
     extension = "plist",
     template =
@@ -42,12 +42,11 @@ MIGRATION = '''        // Import the previous sideloaded build's private data be
 
 
 def configure(root: Path, group: str) -> int:
-    if not group:
-        return 0
-    if not re.fullmatch(r"group\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*", group):
+    if group and not re.fullmatch(r"group\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*", group):
         raise ValueError("App Group must be a complete identifier starting with group., without wildcards")
 
     helper = Path(__file__).resolve().parents[1] / "runtime/AyuAppGroupMigration.swift"
+    resolver = helper.with_name("AyuAppGroupResolver.swift").read_text()
     updates = {}
     for relative, expected in SOURCES.items():
         path = root / relative
@@ -57,6 +56,7 @@ def configure(root: Path, group: str) -> int:
         # Keep the bundle-derived fallback: some scopes otherwise leave baseAppBundleId
         # unused, which fails the upstream build with -warnings-as-errors.
         updates[path] = text.replace(ORIGINAL, LOOKUP)
+        updates[path.parent / 'AyuAppGroupResolver.swift'] = resolver
 
     # Extensions use AppNameInfoPlist; the app uses TelegramInfoPlist instead.
     # Setting only the former silently leaves Bundle.main on the default group.
@@ -65,10 +65,11 @@ def configure(root: Path, group: str) -> int:
     for anchor in (PLIST_ANCHOR, MAIN_PLIST_ANCHOR):
         if build_text.count(anchor) != 1:
             raise ValueError("Telegram/BUILD: missing main or extension Info.plist fragment")
-        build_text = build_text.replace(
-            anchor,
-            anchor + f"    <key>AyuGramAppGroup</key>\n    <string>{group}</string>\n",
-        )
+        if group:
+            build_text = build_text.replace(
+                anchor,
+                anchor + f"    <key>AyuGramAppGroup</key>\n    <string>{group}</string>\n",
+            )
     updates[build] = build_text
 
     delegate = root / APP_DELEGATE
