@@ -68,6 +68,8 @@ struct NotificationDiagnosticsTests {
         Diagnostics.suppressEmptyNotification(service)
         precondition(service.title == " " && service.body.isEmpty && service.sound == nil)
         precondition(service.badge == 3 && service.categoryIdentifier.isEmpty)
+        precondition(service.threadIdentifier == Diagnostics.serviceThreadIdentifier && !Diagnostics.isEmpty(service))
+        precondition(Diagnostics.isEmpty(UNMutableNotificationContent()))
         if #available(iOS 15.0, macOS 12.0, *) {
             precondition(service.interruptionLevel == .passive && service.relevanceScore == 0)
         }
@@ -94,7 +96,7 @@ struct NotificationDiagnosticsTests {
         var record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
         precondition(record["failure"] as? String == "decryptionFailed")
         precondition(record["phase"] as? String == "delivered")
-        precondition(Set(record.keys).isSubset(of: ["phase", "failure", "timestamp", "usedPayloadFallback", "messageBodyPresent", "privacyHidden", "servicePush", "processingSeconds"]))
+        precondition(Set(record.keys).isSubset(of: ["phase", "failure", "timestamp", "usedPayloadFallback", "messageBodyPresent", "privacyHidden", "servicePush", "processingSeconds", "accountRecords", "accountsWithPushKey", "deliveredOriginal"]))
         let statusText = String(data: try Data(contentsOf: file), encoding: .utf8)!
         precondition(!statusText.contains("Private message"))
 
@@ -124,6 +126,24 @@ struct NotificationDiagnosticsTests {
         Diagnostics.write(.received, to: file, timestamp: 200)
         record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
         precondition(record["processingSeconds"] == nil)
+
+        // A push the extension cannot match to an account keeps the original alert and says why.
+        Diagnostics.write(.keyNotFound, to: file, accountRecords: 0, accountsWithPushKey: 0)
+        Diagnostics.write(.delivered, to: file, hasBody: true, deliveredOriginal: true)
+        record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        precondition(record["failure"] as? String == "keyNotFound")
+        precondition(record["accountRecords"] as? Int == 0 && record["accountsWithPushKey"] as? Int == 0)
+        precondition(record["deliveredOriginal"] as? Bool == true)
+        Diagnostics.write(.received, to: file)
+        record = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+        precondition(record["accountRecords"] == nil && record["deliveredOriginal"] == nil)
+
+        let root = directory.appendingPathComponent("telegram-data")
+        precondition(Diagnostics.accountDirectoryCount(in: root) == nil)
+        for name in ["accounts-metadata", "account-1", "account-2", "temp"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        precondition(Diagnostics.accountDirectoryCount(in: root) == 2)
         print("Notification payload and diagnostics checks passed")
     }
 }

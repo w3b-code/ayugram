@@ -29,6 +29,7 @@ MAIN_PLIST_ANCHOR = PLIST_ANCHOR.replace('"AppNameInfoPlist"', '"TelegramInfoPli
 APP_DELEGATE = "submodules/TelegramUI/Sources/AppDelegate.swift"
 FALLBACK = "        if maybeAppGroupUrl == nil {\n"
 MIGRATION = '''        // Import the previous sideloaded build's private data before opening any database.
+        var ayuStorageIssue: String? = maybeAppGroupUrl == nil ? "группа \\(appGroupName) недоступна приложению" : nil
         if let sharedUrl = maybeAppGroupUrl, let legacyUrl = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false) {
             do {
                 try ayuMigrateLegacyAppGroupData(from: legacyUrl, to: sharedUrl)
@@ -36,6 +37,16 @@ MIGRATION = '''        // Import the previous sideloaded build's private data be
                 NSLog("AyuGram: could not import private data into the shared App Group: %@", String(describing: error))
                 // Keep using the intact private copy if migration fails (e.g. insufficient space).
                 maybeAppGroupUrl = nil
+                ayuStorageIssue = "перенос в общую папку не удался: \\(error.localizedDescription)"
+            }
+        }
+        // The notification check reports this: push text needs the account in the shared folder.
+        UserDefaults.standard.set(ayuStorageIssue, forKey: "AyuGramSharedStorageIssue")
+        // Silent placeholders for read/deleted pushes are not needed once the app is open.
+        UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
+            let ids = notifications.filter { $0.request.content.threadIdentifier == "ayu-service-notifications" }.map { $0.request.identifier }
+            if !ids.isEmpty {
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
             }
         }
 '''

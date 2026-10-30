@@ -10,6 +10,21 @@ def replace_once(source, old, new):
     return source.replace(old, new)
 
 
+def mark_failure(source, message):
+    """Make a failed run deliver the original APNs alert instead of a blank placeholder."""
+    position = source.index('Logger.shared.log("NotificationService \\(episode)", "' + message + '")')
+    start = source.index('let content = ', position)
+    if start - position > 300:
+        raise ValueError('Notification source changed after: ' + message)
+    line_start = source.rfind('\n', 0, start) + 1
+    line_end = source.index('\n', start)
+    indent = source[line_start:start]
+    line = source[start:line_end]
+    # A decrypted service push already chose its silent result; keep it.
+    value = 'payloadFallback == nil' if 'payloadFallback ??' in line else 'true'
+    return source[:start] + 'var' + line[3:] + '\n' + indent + 'content.ayuDeliverOriginal = ' + value + source[line_end:]
+
+
 def configure(root: Path):
     service = root / 'Telegram/NotificationService/Sources/NotificationService.swift'
     source = service.read_text()
@@ -104,17 +119,28 @@ def configure(root: Path):
     # As in Swiftgram's legacyNotificationsFix, an empty result must not restore
     # the original generic APNs text on iOS. This also covers already-read messages.
     content_end = '        return content\n    }\n}\n\nprivate func getCurrentRenderedTotalUnreadCount'
-    source = replace_once(source, content_end, '        AyuNotificationDiagnostics.suppressEmptyNotification(content)\n' + content_end)
-    for message, phase in [
-        ("Couldn't find a matching decryption key", 'keyNotFound'),
-        ("Didn't receive stateManager", 'databaseUnavailable'),
-        ("Didn't receive decryption key", 'keyUnavailable'),
-        ("Couldn't decrypt payload", 'decryptionFailed'),
+    # Swiftgram keeps this behind an opt-in setting. Here it applies only to pushes that
+    # intentionally show nothing; a failed run must not turn every message into a blank alert.
+    source = replace_once(source, content_end, '        if !self.ayuDeliverOriginal {\n            AyuNotificationDiagnostics.suppressEmptyNotification(content)\n        }\n' + content_end)
+    source = replace_once(source, '    var silent = false\n', '    var silent = false\n    /// AyuGram: processing failed, so an empty result shows the original APNs alert.\n    var ayuDeliverOriginal = false\n')
+    accounts_with_key = (', accountRecords: records.records.count, accountsWithPushKey: records.records.filter { record in\n'
+        '                    record.attributes.contains { attribute in\n'
+        '                        if case let .backupData(backupData) = attribute, backupData.data?.notificationEncryptionKeyId != nil { return true }\n'
+        '                        return false\n'
+        '                    }\n'
+        '                }.count')
+    for message, phase, details in [
+        ("Couldn't find a matching decryption key", 'keyNotFound', accounts_with_key),
+        ("Didn't receive stateManager", 'databaseUnavailable', ''),
+        ("Didn't receive decryption key", 'keyUnavailable', ''),
+        ("Couldn't decrypt payload", 'decryptionFailed', ''),
     ]:
         old = 'Logger.shared.log("NotificationService \\(episode)", "'+message+'")'
         position = source.index(old)
         indent = source[source.rfind('\n', 0, position)+1:position]
-        source = replace_once(source, old, 'AyuNotificationDiagnostics.record(.'+phase+')\n'+indent+old)
+        source = replace_once(source, old, 'AyuNotificationDiagnostics.record(.'+phase+details+')\n'+indent+old)
+        source = mark_failure(source, message)
+    source = mark_failure(source, "Couldn't process payload as JSON")
     source = replace_once(source, '                            Logger.shared.log("NotificationService \\(episode)", "Will poll")', '                            AyuNotificationDiagnostics.record(.waitingForNetwork)\n                            Logger.shared.log("NotificationService \\(episode)", "Will poll")')
     source = replace_once(source, '                                            let _ = connectionGaveUp.swap(true)', '                                            AyuNotificationDiagnostics.record(.networkTimeout)\n                                            let _ = connectionGaveUp.swap(true)')
     source = replace_once(source, '                                let pollSignal: Signal<Never, NoError>', '''                                let usesTargetedFetch = messageId != nil && AyuNotificationDiagnostics.canFetchMessageDirectly(payloadJson)
@@ -168,7 +194,7 @@ def configure(root: Path):
                                         return (content, nil)
                                     }
                                     |> then(''')
-    source = replace_once(source, '        self.initialContent = request.content', '        let processingStarted = ProcessInfo.processInfo.systemUptime\n        AyuNotificationDiagnostics.record(.received)\n        let _ = self.content.swap(nil)\n        self.initialContent = request.content')
+    source = replace_once(source, '        self.initialContent = request.content', '        let processingStarted = ProcessInfo.processInfo.systemUptime\n        AyuNotificationDiagnostics.record(.received)\n        AyuNotificationDiagnostics.removeServiceNotifications()\n        let _ = self.content.swap(nil)\n        self.initialContent = request.content')
     source = replace_once(source, '            return BoxedNotificationServiceHandler(value: NotificationServiceHandler(', '            let handler = NotificationServiceHandler(')
     source = replace_once(source, '                payload: request.content.userInfo\n            ))', '''                payload: request.content.userInfo
             )
@@ -178,10 +204,23 @@ def configure(root: Path):
                 callback(request.content)
             }
             return BoxedNotificationServiceHandler(value: handler)''')
-    source = replace_once(source, '                            contentHandler(content.generate())', '''                            let rendered = content.generate()
-                            AyuNotificationDiagnostics.record(.delivered, hasBody: !rendered.body.isEmpty, processingSeconds: ProcessInfo.processInfo.systemUptime - processingStarted)
-                            contentHandler(rendered)''')
     source = replace_once(source, '                            contentHandler(initialContent)', '                            AyuNotificationDiagnostics.record(.delivered, hasBody: !initialContent.body.isEmpty, processingSeconds: ProcessInfo.processInfo.systemUptime - processingStarted)\n                            contentHandler(initialContent)')
+    source = replace_once(source, '                            contentHandler(content.generate())', '''                            let rendered = content.generate()
+                            if content.ayuDeliverOriginal, AyuNotificationDiagnostics.isEmpty(rendered), let initialContent = strongSelf.initialContent {
+                                AyuNotificationDiagnostics.record(.delivered, hasBody: !initialContent.body.isEmpty, processingSeconds: ProcessInfo.processInfo.systemUptime - processingStarted, deliveredOriginal: true)
+                                contentHandler(initialContent)
+                            } else {
+                                AyuNotificationDiagnostics.record(.delivered, hasBody: !rendered.body.isEmpty, processingSeconds: ProcessInfo.processInfo.systemUptime - processingStarted)
+                                contentHandler(rendered)
+                            }''')
+    source = replace_once(source, '''            if let content = self.content.with({ $0 }) {
+                contentHandler(content.generate())''', '''            if let content = self.content.with({ $0 }) {
+                let rendered = content.generate()
+                if content.ayuDeliverOriginal, AyuNotificationDiagnostics.isEmpty(rendered), let initialContent = self.initialContent {
+                    contentHandler(initialContent)
+                } else {
+                    contentHandler(rendered)
+                }''')
     source = replace_once(source, '    override func serviceExtensionTimeWillExpire() {', '    override func serviceExtensionTimeWillExpire() {\n        AyuNotificationDiagnostics.record(.expired)')
 
     settings = root / 'submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift'
