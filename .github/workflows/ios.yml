@@ -43,7 +43,8 @@ jobs:
       - name: Checkout this repository
         uses: actions/checkout@v4
         with:
-          ref: ios
+          # A manual run builds the branch it was started from (main mirrors ios); pushes build ios.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name != 'main' && github.ref_name || 'ios' }}
 
       - name: Set iOS build number
         run: echo "AYUGRAM_BUILD_NUMBER=$((100 + ${{ github.run_number }}))" >> "$GITHUB_ENV"

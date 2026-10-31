@@ -2,7 +2,8 @@
 
 Версия для iPhone. Ветки `main` и `ios` содержат одно и то же; сборка идёт из `ios`.
 
-В Actions выберите **Build AyuGram iOS**. Workflow всегда собирает содержимое ветки `ios`.
+В Actions выберите **Build AyuGram iOS**. Push в `ios` собирает `ios`; ручной запуск собирает выбранную
+ветку (для `main` — `ios`), так можно собрать пробную версию из рабочей ветки, не трогая `ios`.
 
 Аналог AyuGram на базе открытого [Telegram-iOS](https://github.com/TelegramMessenger/Telegram-iOS) (GPL-2.0).
 Функции взяты из разбора Android-сборки `vanilla-AyuGram-lite-20261005.apk`, подробности в
