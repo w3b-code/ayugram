@@ -1,0 +1,78 @@
+diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+index a339eff..5e960a2 100644
+--- a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
++++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+@@ -463,12 +463,16 @@ func ayuKeepExpiringMessage(transaction: Transaction, id: MessageId) -> Bool {
+         if !attributes.contains(where: { $0 is AyuDeletedMessageAttribute }) {
+             attributes.append(AyuDeletedMessageAttribute(deletedAt: timestamp))
+         }
+-        var tags = current.tags
++        // Timer media carries no photo/video tags, so the media viewer could not find it and opened
++        // another photo of the chat. Without the timer it gets the tags of ordinary media.
++        let (mediaTags, mediaGlobalTags) = ayuMediaTags(attributes: attributes, media: current.media)
++        var tags = current.tags.union(mediaTags)
+         tags.remove(.unseenPersonalMessage)
++        let globalTags = current.globalTags.union(mediaGlobalTags)
+         let storeForwardInfo = current.forwardInfo.flatMap { forwardInfo in
+             StoreMessageForwardInfo(authorId: forwardInfo.author?.id, sourceId: forwardInfo.source?.id, sourceMessageId: forwardInfo.sourceMessageId, date: forwardInfo.date, authorSignature: forwardInfo.authorSignature, psaType: forwardInfo.psaType, flags: forwardInfo.flags)
+         }
+-        return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: tags, globalTags: current.globalTags, localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: attributes, media: current.media))
++        return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: tags, globalTags: globalTags, localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: attributes, media: current.media))
+     })
+     if !wasDeleted {
+         ayuIndexDeletedMessage(transaction: transaction, id: id)
+@@ -486,5 +490,41 @@ func ayuKeepExpiredMedia(previous: Message, updated: StoreMessage) -> StoreMessa
+     if !attributes.contains(where: { $0 is AyuDeletedMessageAttribute }) {
+         attributes.append(AyuDeletedMessageAttribute(deletedAt: Int32(Date().timeIntervalSince1970)))
+     }
+-    return updated.withUpdatedMedia(previous.media).withUpdatedAttributes(attributes)
++    let (mediaTags, mediaGlobalTags) = ayuMediaTags(attributes: attributes, media: previous.media)
++    var tags = updated.tags.union(mediaTags)
++    tags.remove(.unseenPersonalMessage)
++    return StoreMessage(id: updated.id, customStableId: updated.customStableId, globallyUniqueId: updated.globallyUniqueId, groupingKey: updated.groupingKey, threadId: updated.threadId, timestamp: updated.timestamp, flags: updated.flags, tags: tags, globalTags: updated.globalTags.union(mediaGlobalTags), localTags: updated.localTags, forwardInfo: updated.forwardInfo, authorId: updated.authorId, text: updated.text, attributes: attributes, media: previous.media)
++}
++
++/// The media tags (photo, video, file…) a message gets once it has no self-destruct timer.
++private func ayuMediaTags(attributes: [MessageAttribute], media: [Media]) -> (MessageTags, GlobalMessageTags) {
++    return tagsForStoreMessage(incoming: true, attributes: attributes, media: media, textEntities: nil, isPinned: false)
++}
++
++/// Once: gives saved deleted media the photo/video tags that an earlier build left out, so tapping it
++/// opens that media instead of another one of the chat.
++func ayuRepairDeletedMediaTags(transaction: Transaction) {
++    let key = ValueBoxKey(length: 8)
++    key.setInt64(0, value: 0x6179757461677331)
++    if transaction.getPreferencesEntry(key: key)?.get(AyuUnreadRepairState.self)?.completed == true {
++        return
++    }
++    let index = transaction.getPreferencesEntry(key: ayuDeletedMessagesIndexKey)?.get(AyuDeletedMessagesIndex.self)
++    for item in index?.items ?? [] {
++        let id = MessageId(peerId: PeerId(item.peerId), namespace: item.namespace, id: item.id)
++        guard let message = transaction.getMessage(id), message.ayuDeletedAttribute != nil, !message.media.isEmpty else {
++            continue
++        }
++        let (mediaTags, mediaGlobalTags) = ayuMediaTags(attributes: message.attributes, media: message.media)
++        if message.tags.isSuperset(of: mediaTags) && message.globalTags.isSuperset(of: mediaGlobalTags) {
++            continue
++        }
++        transaction.updateMessage(id, update: { current in
++            let storeForwardInfo = current.forwardInfo.flatMap { forwardInfo in
++                StoreMessageForwardInfo(authorId: forwardInfo.author?.id, sourceId: forwardInfo.source?.id, sourceMessageId: forwardInfo.sourceMessageId, date: forwardInfo.date, authorSignature: forwardInfo.authorSignature, psaType: forwardInfo.psaType, flags: forwardInfo.flags)
++            }
++            return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: current.tags.union(mediaTags), globalTags: current.globalTags.union(mediaGlobalTags), localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: current.attributes, media: current.media))
++        })
++    }
++    transaction.updatePreferencesEntry(key: key, { _ in PreferencesEntry(AyuUnreadRepairState(completed: true)) })
+ }
+diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+index e33bb9d..5a38fcb 100644
+--- a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
++++ b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+@@ -4120,6 +4120,7 @@ func replayFinalState(
+     }
+     
+     ayuRepairDeletedMessageUnreadCounts(transaction: transaction)
++    ayuRepairDeletedMediaTags(transaction: transaction)
+ 
+     var peerIdsWithAddedSecretMessages = Set<PeerId>()
+     
