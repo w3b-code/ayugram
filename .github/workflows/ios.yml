@@ -97,6 +97,10 @@ jobs:
             git apply --whitespace=nowarn "$p"
           done
 
+      - name: Refresh expired fake provisioning profiles
+        # Telegram's fake profiles expired on 2026-10-30; the build rejects an expired profile.
+        run: python3 scripts/refresh-fake-profiles.py telegram
+
       - name: Configure provisioned App Group
         run: python3 scripts/configure-app-group.py telegram
 
