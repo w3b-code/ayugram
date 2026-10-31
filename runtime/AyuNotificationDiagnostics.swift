@@ -208,6 +208,16 @@ public enum AyuNotificationDiagnostics {
         }
     }
 
+    /// Clears a placeholder just handed to iOS while the extension still runs: iOS keeps the process
+    /// for a few seconds after delivery, and anything left is cleared by the next push or the app.
+    public static func removeServiceNotificationsSoon() {
+        for delay in [0.7, 2.0, 5.0] {
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                AyuNotificationDiagnostics.removeServiceNotifications()
+            }
+        }
+    }
+
     /// iOS cannot drop a delivered placeholder by itself; clear earlier ones on the next run.
     public static func removeServiceNotifications() {
         let thread = serviceThreadIdentifier

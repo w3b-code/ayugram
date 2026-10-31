@@ -1,0 +1,65 @@
+diff --git a/submodules/TelegramUI/Sources/SharedWakeupManager.swift b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+index a154a0b..297a877 100644
+--- a/submodules/TelegramUI/Sources/SharedWakeupManager.swift
++++ b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ import BackgroundTasks
+ import AVFAudio
++import UserNotifications
+ import AyuGramSettings
+ import UIKit
+ import SwiftSignalKit
+@@ -95,6 +96,7 @@ public final class SharedWakeupManager {
+     private var ayuKeepAliveInBackground: Bool = false
+     private var ayuSettingsDisposable: Disposable?
+     private var ayuAudioObservers: [NSObjectProtocol] = []
++    private var ayuPlaceholderTimer: SwiftSignalKit.Timer?
+     
+     private var accountsAndTasks: [(Account, Bool, AccountTasks)] = []
+     
+@@ -154,6 +156,8 @@ public final class SharedWakeupManager {
+             }
+             strongSelf.inForeground = value
+             if value {
++                // AyuGram: silent placeholders for read/deleted pushes are not needed once the app is open.
++                ayuRemoveServicePlaceholders()
+                 strongSelf.activeExplicitExtensionTimer?.invalidate()
+                 strongSelf.activeExplicitExtensionTimer = nil
+                 if let activeExplicitExtensionTask = strongSelf.activeExplicitExtensionTask {
+@@ -1197,11 +1201,20 @@ public final class SharedWakeupManager {
+                 self.silenceAudioRenderer = silenceAudioRenderer
+                 silenceAudioRenderer.start()
+                 Logger.shared.log("Wakeup", "AyuGram keep-alive started")
++                // While the app stays alive in the background, placeholders go within seconds.
++                let placeholderTimer = SwiftSignalKit.Timer(timeout: 10.0, repeat: true, completion: {
++                    ayuRemoveServicePlaceholders()
++                }, queue: Queue.mainQueue())
++                self.ayuPlaceholderTimer?.invalidate()
++                self.ayuPlaceholderTimer = placeholderTimer
++                placeholderTimer.start()
+                 self.updateAccounts(hasTasks: hasTasksForBackgroundExtension, endTaskAfterTransactionsComplete: nil)
+             }
+         } else if let silenceAudioRenderer = self.silenceAudioRenderer {
+             self.silenceAudioRenderer = nil
+             silenceAudioRenderer.stop()
++            self.ayuPlaceholderTimer?.invalidate()
++            self.ayuPlaceholderTimer = nil
+             Logger.shared.log("Wakeup", "AyuGram keep-alive stopped")
+             self.updateAccounts(hasTasks: hasTasksForBackgroundExtension, endTaskAfterTransactionsComplete: nil)
+         }
+@@ -1288,3 +1301,14 @@ public final class SharedWakeupManager {
+         }
+     }
+ }
++
++/// AyuGram: removes the passive placeholders the notification extension shows for pushes that must not
++/// show anything (read or deleted elsewhere); iOS without Apple's filtering entitlement cannot drop them.
++private func ayuRemoveServicePlaceholders() {
++    UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
++        let ids = notifications.filter { $0.request.content.threadIdentifier == "ayu-service-notifications" }.map { $0.request.identifier }
++        if !ids.isEmpty {
++            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
++        }
++    }
++}
