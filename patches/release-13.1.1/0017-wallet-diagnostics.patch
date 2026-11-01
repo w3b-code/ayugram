@@ -1,0 +1,195 @@
+diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuWalletDiagnostics.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuWalletDiagnostics.swift
+new file mode 100644
+index 00000000..25d07651
+--- /dev/null
++++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuWalletDiagnostics.swift
+@@ -0,0 +1,21 @@
++import Foundation
++
++/// The wallet check in the AyuGram settings. The app registers a report for each account, since the
++/// settings module cannot reach the wallet itself. Reports never contain keys or the recovery phrase.
++public enum AyuWalletDiagnostics {
++    private static let lock = NSLock()
++    private static var providers: [Int64: () -> String] = [:]
++
++    public static func register(accountId: Int64, _ provider: @escaping () -> String) {
++        self.lock.lock()
++        self.providers[accountId] = provider
++        self.lock.unlock()
++    }
++
++    public static func report(accountId: Int64) -> String {
++        self.lock.lock()
++        let provider = self.providers[accountId]
++        self.lock.unlock()
++        return provider?() ?? "Кошелёк для этого аккаунта не запущен."
++    }
++}
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+index dad5725f..9bf008d6 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+@@ -12,11 +12,13 @@ import AyuGramSettings
+ private final class AyuGramSettingsControllerArguments {
+     let update: ((inout AyuSettingsValues) -> Void) -> Void
+     let openPage: (AyuGramSettingsPage) -> Void
++    let walletDiagnostics: () -> Void
+     let testAIModels: () -> Void
+ 
+-    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void, openPage: @escaping (AyuGramSettingsPage) -> Void, testAIModels: @escaping () -> Void) {
++    init(update: @escaping ((inout AyuSettingsValues) -> Void) -> Void, openPage: @escaping (AyuGramSettingsPage) -> Void, walletDiagnostics: @escaping () -> Void, testAIModels: @escaping () -> Void) {
+         self.update = update
+         self.openPage = openPage
++        self.walletDiagnostics = walletDiagnostics
+         self.testAIModels = testAIModels
+     }
+ }
+@@ -58,6 +60,7 @@ private enum AyuGramSettingsSection: Int32 {
+     case autoSend
+     case chatTools
+     case background
++    case wallet
+     case interface
+     case ai
+     case aiModel
+@@ -164,6 +167,7 @@ private enum AyuGramChoice: Equatable {
+ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+     case header(id: Int32, section: AyuGramSettingsSection, text: String)
+     case page(id: Int32, section: AyuGramSettingsSection, page: AyuGramSettingsPage, label: String)
++    case walletDiagnostics(id: Int32, section: AyuGramSettingsSection)
+     case toggle(id: Int32, section: AyuGramSettingsSection, toggle: AyuGramToggle, title: String, value: Bool, enabled: Bool)
+     case choice(id: Int32, section: AyuGramSettingsSection, choice: AyuGramChoice, title: String, checked: Bool)
+     case footer(id: Int32, section: AyuGramSettingsSection, text: String)
+@@ -172,14 +176,14 @@ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+ 
+     var section: ItemListSectionId {
+         switch self {
+-        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _), let .page(_, section, _, _), let .testAIModels(_, section):
++        case let .header(_, section, _), let .toggle(_, section, _, _, _, _), let .choice(_, section, _, _, _), let .footer(_, section, _), let .apiKey(_, section, _), let .page(_, section, _, _), let .walletDiagnostics(_, section), let .testAIModels(_, section):
+             return section.rawValue
+         }
+     }
+ 
+     var stableId: Int32 {
+         switch self {
+-        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _), let .page(id, _, _, _), let .testAIModels(id, _):
++        case let .header(id, _, _), let .toggle(id, _, _, _, _, _), let .choice(id, _, _, _, _), let .footer(id, _, _), let .apiKey(id, _, _), let .page(id, _, _, _), let .walletDiagnostics(id, _), let .testAIModels(id, _):
+             return id
+         }
+     }
+@@ -203,6 +207,10 @@ private enum AyuGramSettingsEntry: ItemListNodeEntry {
+             })
+         case let .footer(_, _, text):
+             return ItemListTextItem(presentationData: presentationData, text: .plain(text), sectionId: self.section)
++        case .walletDiagnostics:
++            return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: "Проверка кошелька", label: "", sectionId: self.section, style: .blocks, action: {
++                arguments.walletDiagnostics()
++            })
+         case let .page(_, _, page, label):
+             return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: page.title, label: label, sectionId: self.section, style: .blocks, action: {
+                 arguments.openPage(page)
+@@ -323,6 +331,10 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues, page: AyuGramSett
+         header(.background, "РАБОТА В ФОНЕ")
+         toggle(.background, .keepAlive, "Держать в фоне", values.keepAliveInBackground)
+         footer(.background, "Не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи): соединение остаётся, удаления и правки приходят сразу, автоотправка продолжает работать. После звонка или чужого звука работа в фоне возобновляется сама. Закрытое смахиванием приложение не работает.")
++
++        header(.wallet, "КОШЕЛЁК")
++        add { .walletDiagnostics(id: $0, section: .wallet) }
++        footer(.wallet, "Показывает, в каком состоянии кошелёк Telegram на этом устройстве: получен ли адрес, есть ли ключ для подписи и последняя ошибка. Ключи и секретная фраза не показываются.")
+     }
+ 
+     return entries
+@@ -334,11 +346,15 @@ public func ayuGramSettingsController(context: AccountContext) -> ViewController
+ 
+ private func ayuGramSettingsPageController(context: AccountContext, page: AyuGramSettingsPage) -> ViewController {
+     var pushControllerImpl: ((ViewController) -> Void)?
++    var walletPresentImpl: ((ViewController) -> Void)?
+     var windowImpl: (() -> UIWindow?)?
+     let arguments = AyuGramSettingsControllerArguments(update: { f in
+         AyuSettings.shared.update(f)
+     }, openPage: { page in
+         pushControllerImpl?(ayuGramSettingsPageController(context: context, page: page))
++    }, walletDiagnostics: {
++        let report = AyuWalletDiagnostics.report(accountId: context.account.peerId.toInt64())
++        walletPresentImpl?(textAlertController(context: context, title: "Проверка кошелька", text: report, actions: [TextAlertAction(type: .defaultAction, title: "OK", action: {})]))
+     }, testAIModels: {
+         ayuAIPresentSpeedTest(context: context, window: windowImpl?())
+     })
+@@ -354,6 +370,9 @@ private func ayuGramSettingsPageController(context: AccountContext, page: AyuGra
+     }
+ 
+     let controller = ItemListController(context: context, state: signal)
++    walletPresentImpl = { [weak controller] c in
++        controller?.present(c, in: .window(.root))
++    }
+     pushControllerImpl = { [weak controller] c in
+         (controller?.navigationController as? NavigationController)?.pushViewController(c)
+     }
+diff --git a/submodules/TelegramUI/Sources/AccountContext.swift b/submodules/TelegramUI/Sources/AccountContext.swift
+index d732d37f..f094cfed 100644
+--- a/submodules/TelegramUI/Sources/AccountContext.swift
++++ b/submodules/TelegramUI/Sources/AccountContext.swift
+@@ -32,6 +32,7 @@ import WalletConnectScreen
+ import AlertUI
+ import MetalEngine
+ import AyuAutoSend
++import AyuGramSettings
+ 
+ private final class DeviceSpecificContactImportContext {
+     let disposable = MetaDisposable()
+@@ -692,6 +693,12 @@ public final class AccountContextImpl: AccountContext {
+         // AyuGram: the private chat buttons act for this account while the app runs.
+         if !temp {
+             AyuChatTools.shared.attach(context: self)
++            AyuWalletDiagnostics.register(accountId: account.peerId.toInt64(), { [weak self] in
++                guard let walletContext = self?.walletContext else {
++                    return "Кошелёк для этого аккаунта не создан: сервер Telegram ещё не включил его."
++                }
++                return ayuDescribeWalletState(walletContext.stateValue)
++            })
+         }
+     }
+ 
+diff --git a/submodules/TelegramUI/Sources/AyuWalletDiagnosticsReport.swift b/submodules/TelegramUI/Sources/AyuWalletDiagnosticsReport.swift
+new file mode 100644
+index 00000000..32ad6fac
+--- /dev/null
++++ b/submodules/TelegramUI/Sources/AyuWalletDiagnosticsReport.swift
+@@ -0,0 +1,37 @@
++import Foundation
++import WalletContext
++
++/// The wallet's state in words, without keys or the recovery phrase.
++func ayuDescribeWalletState(_ state: WalletContext.State) -> String {
++    var lines: [String] = []
++    switch state.phase {
++    case .restoring:
++        lines.append("Состояние: восстановление на этом устройстве")
++    case .creating:
++        lines.append("Состояние: создание кошелька")
++    case .empty:
++        lines.append("Состояние: кошелька нет (сервер не вернул кошелёк для аккаунта)")
++    case let .wallet(info):
++        lines.append("Состояние: кошелёк готов")
++        lines.append("Ключ для подписи на устройстве: " + (info.canSign ? "есть" : "нет"))
++        lines.append("Восстановление фразы из резервной копии: " + (info.canExportPhrase ? "доступно" : "недоступно"))
++        lines.append("Резервная копия на серверах: " + (info.backupEnabled ? "включена" : "выключена"))
++    case let .failed(error):
++        lines.append("Состояние: ошибка хранилища — \(error)")
++    }
++    lines.append("Адрес от сервера: " + (state.walletAddress == nil ? "не получен" : "получен"))
++    switch state.balance {
++    case .idle:
++        lines.append("Баланс: не загружался")
++    case .loading:
++        lines.append("Баланс: загружается")
++    case .value:
++        lines.append("Баланс: загружен")
++    case let .stale(_, error, _):
++        lines.append("Баланс: устарел, ошибка \(error)")
++    }
++    if let operation = state.activeOperation {
++        lines.append("Текущая операция: \(operation)")
++    }
++    return lines.joined(separator: "\n")
++}
