@@ -1,0 +1,18 @@
+diff --git a/submodules/PasscodeCore/Sources/Passcode.swift b/submodules/PasscodeCore/Sources/Passcode.swift
+index d1ff0f65..c1459d4a 100644
+--- a/submodules/PasscodeCore/Sources/Passcode.swift
++++ b/submodules/PasscodeCore/Sources/Passcode.swift
+@@ -95,8 +95,11 @@ public final class PasscodeEnvironment: @unchecked Sendable {
+             throw PasscodeError.unavailable
+         }
+         #if !os(macOS)
+-        guard !group.hasPrefix("group."),
+-              group.hasSuffix("." + configuration.appGroupIdentifier.dropFirst("group.".count)) else {
++        // AyuGram: a re-signed build can use an App Group from its signing profile instead of
++        // group.<bundle id>, so the private group ("<team>.<bundle id>") no longer ends with the App
++        // Group's name. Requiring that made the wallet's keys and biometric items unavailable.
++        // The private group must still not be an App Group.
++        guard !group.hasPrefix("group.") else {
+             throw PasscodeError.unavailable
+         }
+         #endif
