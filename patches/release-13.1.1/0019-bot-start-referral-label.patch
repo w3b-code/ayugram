@@ -1,0 +1,21 @@
+diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+index f857bd04..5bf847b9 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+@@ -1942,6 +1942,16 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
+             let previousState = self.presentationInterfaceState
+             self.presentationInterfaceState = interfaceState
+             
++            // AyuGram: show the referral (start) parameter the bot was opened with under the Start title,
++            // so it is visible before the parameter is sent to the bot.
++            var ayuStartSubtitle: String?
++            if let payload = interfaceState.botStartPayload, !payload.isEmpty, !interfaceState.peerIsBlocked {
++                ayuStartSubtitle = "Реферал: \(payload)"
++            }
++            if self.startButton.subtitle != ayuStartSubtitle {
++                self.startButton.subtitle = ayuStartSubtitle
++            }
++            
+             if case .webView = interfaceState.botMenuButton, self.menuButtonIconNode.iconState == .menu {
+                 self.menuButtonIconNode.enqueueState(.app, animated: false)
+             } else if case .commands = interfaceState.botMenuButton, self.menuButtonIconNode.iconState == .app {
