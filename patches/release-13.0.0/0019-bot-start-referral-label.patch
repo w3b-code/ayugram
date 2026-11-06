@@ -1,5 +1,5 @@
 diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
-index f857bd04..d5317a9b 100644
+index f857bd04..7737665a 100644
 --- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
 +++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
 @@ -228,6 +228,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
@@ -15,7 +15,7 @@ index f857bd04..d5317a9b 100644
              self.presentationInterfaceState = interfaceState
              
 +            // AyuGram: like AyuGram Desktop, show the start (referral) parameter the bot was opened with
-+            // in the Start button's title: "<Start> (<first 20 characters>)".
++            // in the Start button's title: "<Start> (start=<first 20 characters>)".
 +            // A blocked bot gets "Restart Bot" like Telegram for Android and Desktop: pressing the button
 +            // already unblocks the bot and sends /start.
 +            var ayuStartTitle = interfaceState.strings.Bot_Start
@@ -23,7 +23,7 @@ index f857bd04..d5317a9b 100644
 +                ayuStartTitle = interfaceState.strings.Bot_Unblock
 +            }
 +            if let payload = interfaceState.botStartPayload, !payload.isEmpty {
-+                ayuStartTitle = "\(ayuStartTitle) (\(String(payload.prefix(20))))"
++                ayuStartTitle = "\(ayuStartTitle) (start=\(String(payload.prefix(20))))"
 +            }
 +            if self.startButton.title != ayuStartTitle {
 +                self.startButton.title = ayuStartTitle
