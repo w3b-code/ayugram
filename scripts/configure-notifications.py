@@ -228,6 +228,9 @@ def configure(root: Path):
                             } else {
                                 AyuNotificationDiagnostics.record(.delivered, hasBody: !rendered.body.isEmpty, processingSeconds: ProcessInfo.processInfo.systemUptime - processingStarted)
                                 contentHandler(rendered)
+                                if rendered.threadIdentifier == AyuNotificationDiagnostics.serviceThreadIdentifier {
+                                    AyuNotificationDiagnostics.removeServiceNotificationsSoon()
+                                }
                             }''')
     source = replace_once(source, '''            if let content = self.content.with({ $0 }) {
                 contentHandler(content.generate())''', '''            if let content = self.content.with({ $0 }) {
@@ -236,6 +239,9 @@ def configure(root: Path):
                     contentHandler(initialContent)
                 } else {
                     contentHandler(rendered)
+                    if rendered.threadIdentifier == AyuNotificationDiagnostics.serviceThreadIdentifier {
+                        AyuNotificationDiagnostics.removeServiceNotificationsSoon()
+                    }
                 }''')
     source = replace_once(source, '    override func serviceExtensionTimeWillExpire() {', '    override func serviceExtensionTimeWillExpire() {\n        AyuNotificationDiagnostics.record(.expired)')
 

@@ -1,0 +1,697 @@
+diff --git a/submodules/AyuGram/AyuAutoSend/Sources/AyuChatTools.swift b/submodules/AyuGram/AyuAutoSend/Sources/AyuChatTools.swift
+index 4748dbf..07b26f8 100644
+--- a/submodules/AyuGram/AyuAutoSend/Sources/AyuChatTools.swift
++++ b/submodules/AyuGram/AyuAutoSend/Sources/AyuChatTools.swift
+@@ -305,7 +305,7 @@ public final class AyuChatTools {
+     // MARK: - Buttons
+ 
+     /// The input field button: explains the function and switches it for this chat.
+-    public func buttonPressed(_ feature: Feature, context: AccountContext, peerId: EnginePeer.Id, present: @escaping (ViewController) -> Void) {
++    public func buttonPressed(_ feature: Feature, context: AccountContext, peerId: EnginePeer.Id, present: @escaping (ViewController) -> Void, updated: @escaping () -> Void) {
+         let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+         let isEnabled = self.isEnabled(feature, context: context, peerId: peerId)
+         if feature == .ai && !isEnabled && AyuSettings.shared.values.aiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+@@ -329,6 +329,7 @@ public final class AyuChatTools {
+             TextAlertAction(type: .genericAction, title: presentationData.strings.Common_Cancel, action: {}),
+             TextAlertAction(type: .defaultAction, title: isEnabled ? "Выключить" : "Включить", action: { [weak self] in
+                 self?.setEnabled(!isEnabled, feature: feature, context: context, peerId: peerId)
++                updated()
+             })
+         ]))
+     }
+diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuKeychain.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuKeychain.swift
+new file mode 100644
+index 0000000..7bba065
+--- /dev/null
++++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuKeychain.swift
+@@ -0,0 +1,49 @@
++import Foundation
++import Security
++
++/// Secrets of the settings (the Gemini key) kept in the Keychain instead of the plain settings file.
++enum AyuKeychain {
++    private static let service = "ayugram.settings"
++
++    private static func query(_ account: String) -> [String: Any] {
++        return [
++            kSecClass as String: kSecClassGenericPassword,
++            kSecAttrService as String: AyuKeychain.service,
++            kSecAttrAccount as String: account
++        ]
++    }
++
++    /// Nil when there is no value or the Keychain cannot be read yet (before the first unlock).
++    static func read(_ account: String) -> String? {
++        var query = AyuKeychain.query(account)
++        query[kSecReturnData as String] = true
++        query[kSecMatchLimit as String] = kSecMatchLimitOne
++        var result: CFTypeRef?
++        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else {
++            return nil
++        }
++        return String(data: data, encoding: .utf8)
++    }
++
++    /// Stores `value`, or removes it when empty. False if the Keychain refused.
++    static func write(_ account: String, _ value: String) -> Bool {
++        let query = AyuKeychain.query(account)
++        if value.isEmpty {
++            let status = SecItemDelete(query as CFDictionary)
++            return status == errSecSuccess || status == errSecItemNotFound
++        }
++        let attributes: [String: Any] = [
++            kSecValueData as String: Data(value.utf8),
++            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
++        ]
++        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
++        if status == errSecItemNotFound {
++            var item = query
++            for (key, value) in attributes {
++                item[key] = value
++            }
++            status = SecItemAdd(item as CFDictionary, nil)
++        }
++        return status == errSecSuccess
++    }
++}
+diff --git a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
+index 95cbf88..b20f9ea 100644
+--- a/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
++++ b/submodules/AyuGram/AyuGramSettings/Sources/AyuSettings.swift
+@@ -219,8 +219,14 @@ public final class AyuSettings {
+         load("aiResponderEnabled", &values.aiResponderEnabled)
+         load("showDeletedToSenderEnabled", &values.showDeletedToSenderEnabled)
+         load("autoDeleteIncomingEnabled", &values.autoDeleteIncomingEnabled)
+-        if let apiKey = UserDefaults.standard.string(forKey: AyuSettings.keyPrefix + "aiApiKey") {
++        if let apiKey = AyuKeychain.read("gemini-api-key") {
+             values.aiApiKey = apiKey
++        } else if let apiKey = UserDefaults.standard.string(forKey: AyuSettings.keyPrefix + "aiApiKey") {
++            // A key saved by an earlier build moves out of the plain settings file.
++            values.aiApiKey = apiKey
++            if AyuKeychain.write("gemini-api-key", apiKey) {
++                UserDefaults.standard.removeObject(forKey: AyuSettings.keyPrefix + "aiApiKey")
++            }
+         }
+         if let aiModel = UserDefaults.standard.string(forKey: AyuSettings.keyPrefix + "aiModel") {
+             values.aiModel = aiModel
+@@ -297,6 +303,7 @@ public final class AyuSettings {
+ 
+     public func update(_ f: (inout AyuSettingsValues) -> Void) {
+         self.lock.lock()
++        let previousApiKey = self.current.aiApiKey
+         var updated = self.current
+         f(&updated)
+         self.current = updated
+@@ -334,7 +341,14 @@ public final class AyuSettings {
+         store("aiResponderEnabled", updated.aiResponderEnabled)
+         store("showDeletedToSenderEnabled", updated.showDeletedToSenderEnabled)
+         store("autoDeleteIncomingEnabled", updated.autoDeleteIncomingEnabled)
+-        defaults.set(updated.aiApiKey, forKey: AyuSettings.keyPrefix + "aiApiKey")
++        // Only an edited key is written: a Keychain that could not be read yet must not be overwritten.
++        if updated.aiApiKey != previousApiKey {
++            if AyuKeychain.write("gemini-api-key", updated.aiApiKey) {
++                defaults.removeObject(forKey: AyuSettings.keyPrefix + "aiApiKey")
++            } else {
++                defaults.set(updated.aiApiKey, forKey: AyuSettings.keyPrefix + "aiApiKey")
++            }
++        }
+         defaults.set(updated.aiModel, forKey: AyuSettings.keyPrefix + "aiModel")
+ 
+         self.promise.set(updated)
+diff --git a/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift b/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift
+index 7fe31f4..62e81b9 100644
+--- a/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift
++++ b/submodules/ChatPresentationInterfaceState/Sources/ChatTextInputPanelState.swift
+@@ -36,9 +36,9 @@ public enum ChatTextInputAccessoryItem: Equatable {
+     /// AyuGram: opens the chat's timed auto-send template.
+     case ayuAutoSend
+     /// AyuGram private chat buttons: AI replies, showing deletions, deleting new messages.
+-    case ayuAI
+-    case ayuShowDeleted
+-    case ayuAutoDelete
++    case ayuAI(isActive: Bool)
++    case ayuShowDeleted(isActive: Bool)
++    case ayuAutoDelete(isActive: Bool)
+     
+     public var key: Key {
+         switch self {
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
+index 67d9a3a..bcc4181 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuAI.swift
+@@ -10,6 +10,7 @@ import AyuGramSettings
+ public enum AyuAIAction {
+     case summarize
+     case answer
++    case translate
+ 
+     public var title: String {
+         switch self {
+@@ -17,6 +18,8 @@ public enum AyuAIAction {
+             return "Пересказать кратко"
+         case .answer:
+             return "Ответить на вопрос"
++        case .translate:
++            return "Перевести"
+         }
+     }
+ 
+@@ -46,6 +49,12 @@ public enum AyuAIAction {
+             - Если в сообщении нет вопроса, кратко ответь на главное в нём.
+             Не выдумывай факты; если данных не хватает, скажи, чего именно не хватает.
+             """
++        case .translate:
++            return common + """
++
++            Задача: переведи сообщение на русский язык. Если оно уже на русском, переведи на английский.
++            Сохрани смысл, тон, эмодзи и разбивку на строки. Выведи только перевод, без пояснений и без исходного текста.
++            """
+         }
+     }
+ 
+@@ -56,6 +65,8 @@ public enum AyuAIAction {
+             return 0
+         case .answer:
+             return 2048
++        case .translate:
++            return 0
+         }
+     }
+ }
+@@ -117,6 +128,8 @@ private func ayuAIModelOrder(_ selected: String, action: AyuAIAction, discovered
+             first = "gemini-flash-lite-latest"
+         case .answer:
+             first = "gemini-flash-latest"
++        case .translate:
++            first = "gemini-flash-lite-latest"
+         }
+     }
+     var result = [first] + all.filter { $0 != first }
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuEditHistoryController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuEditHistoryController.swift
+new file mode 100644
+index 0000000..657902b
+--- /dev/null
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuEditHistoryController.swift
+@@ -0,0 +1,158 @@
++import Foundation
++import UIKit
++
++/// One version of an edited message as the history screen shows it.
++public struct AyuEditHistoryEntry {
++    public let text: String
++    public let date: Int32?
++    public let isCurrent: Bool
++
++    public init(text: String, date: Int32?, isCurrent: Bool) {
++        self.text = text
++        self.date = date
++        self.isCurrent = isCurrent
++    }
++}
++
++private final class AyuEditHistoryCell: UITableViewCell {
++    static let reuseIdentifier = "AyuEditHistoryCell"
++
++    private let bubble = UIView()
++    private let textView = UITextView()
++    private let dateLabel = UILabel()
++
++    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
++        super.init(style: style, reuseIdentifier: reuseIdentifier)
++        self.backgroundColor = .clear
++        self.selectionStyle = .none
++
++        self.bubble.layer.cornerRadius = 17.0
++        self.bubble.translatesAutoresizingMaskIntoConstraints = false
++        self.contentView.addSubview(self.bubble)
++
++        // Selectable, so any earlier text can be copied.
++        self.textView.isEditable = false
++        self.textView.isSelectable = true
++        self.textView.isScrollEnabled = false
++        self.textView.backgroundColor = .clear
++        self.textView.font = UIFont.preferredFont(forTextStyle: .body)
++        self.textView.textContainerInset = .zero
++        self.textView.textContainer.lineFragmentPadding = 0.0
++        self.textView.translatesAutoresizingMaskIntoConstraints = false
++        self.bubble.addSubview(self.textView)
++
++        self.dateLabel.font = UIFont.systemFont(ofSize: 12.0)
++        self.dateLabel.textAlignment = .right
++        self.dateLabel.translatesAutoresizingMaskIntoConstraints = false
++        self.bubble.addSubview(self.dateLabel)
++
++        NSLayoutConstraint.activate([
++            self.bubble.topAnchor.constraint(equalTo: self.contentView.topAnchor, constant: 4.0),
++            self.bubble.bottomAnchor.constraint(equalTo: self.contentView.bottomAnchor, constant: -4.0),
++            self.bubble.leadingAnchor.constraint(equalTo: self.contentView.leadingAnchor, constant: 12.0),
++            self.bubble.trailingAnchor.constraint(lessThanOrEqualTo: self.contentView.trailingAnchor, constant: -48.0),
++            self.textView.topAnchor.constraint(equalTo: self.bubble.topAnchor, constant: 8.0),
++            self.textView.leadingAnchor.constraint(equalTo: self.bubble.leadingAnchor, constant: 12.0),
++            self.textView.trailingAnchor.constraint(equalTo: self.bubble.trailingAnchor, constant: -12.0),
++            self.dateLabel.topAnchor.constraint(equalTo: self.textView.bottomAnchor, constant: 2.0),
++            self.dateLabel.leadingAnchor.constraint(greaterThanOrEqualTo: self.bubble.leadingAnchor, constant: 12.0),
++            self.dateLabel.trailingAnchor.constraint(equalTo: self.bubble.trailingAnchor, constant: -12.0),
++            self.dateLabel.bottomAnchor.constraint(equalTo: self.bubble.bottomAnchor, constant: -6.0)
++        ])
++    }
++
++    required init?(coder: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    func update(entry: AyuEditHistoryEntry) {
++        self.bubble.backgroundColor = entry.isCurrent ? UIColor.systemBlue.withAlphaComponent(0.18) : UIColor.secondarySystemBackground
++        self.textView.text = entry.text.isEmpty ? "(пусто)" : entry.text
++        self.textView.textColor = .label
++        var dateText = entry.isCurrent ? "сейчас" : "изменено"
++        if let date = entry.date {
++            let formatter = DateFormatter()
++            formatter.dateStyle = .short
++            formatter.timeStyle = .short
++            dateText = (entry.isCurrent ? "сейчас · " : "") + formatter.string(from: Date(timeIntervalSince1970: Double(date)))
++        }
++        self.dateLabel.text = dateText
++        self.dateLabel.textColor = .secondaryLabel
++    }
++}
++
++/// Every version of an edited message as a chat: the oldest on top, the current text at the bottom.
++private final class AyuEditHistoryController: UIViewController, UITableViewDataSource {
++    private let entries: [AyuEditHistoryEntry]
++    private let tableView = UITableView(frame: CGRect(), style: .plain)
++
++    init(entries: [AyuEditHistoryEntry]) {
++        self.entries = entries
++        super.init(nibName: nil, bundle: nil)
++        self.title = "История правок"
++    }
++
++    required init?(coder: NSCoder) {
++        fatalError("init(coder:) has not been implemented")
++    }
++
++    override func viewDidLoad() {
++        super.viewDidLoad()
++        self.view.backgroundColor = .systemBackground
++        self.navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Закрыть", style: .plain, target: self, action: #selector(self.closePressed))
++
++        self.tableView.dataSource = self
++        self.tableView.separatorStyle = .none
++        self.tableView.backgroundColor = .clear
++        self.tableView.rowHeight = UITableView.automaticDimension
++        self.tableView.estimatedRowHeight = 60.0
++        self.tableView.contentInset = UIEdgeInsets(top: 8.0, left: 0.0, bottom: 8.0, right: 0.0)
++        self.tableView.register(AyuEditHistoryCell.self, forCellReuseIdentifier: AyuEditHistoryCell.reuseIdentifier)
++        self.tableView.translatesAutoresizingMaskIntoConstraints = false
++        self.view.addSubview(self.tableView)
++        NSLayoutConstraint.activate([
++            self.tableView.topAnchor.constraint(equalTo: self.view.topAnchor),
++            self.tableView.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
++            self.tableView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor),
++            self.tableView.trailingAnchor.constraint(equalTo: self.view.trailingAnchor)
++        ])
++    }
++
++    override func viewDidAppear(_ animated: Bool) {
++        super.viewDidAppear(animated)
++        // Like a chat, it opens at the newest text.
++        if !self.entries.isEmpty {
++            self.tableView.scrollToRow(at: IndexPath(row: self.entries.count - 1, section: 0), at: .bottom, animated: false)
++        }
++    }
++
++    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
++        return self.entries.count
++    }
++
++    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
++        let cell = tableView.dequeueReusableCell(withIdentifier: AyuEditHistoryCell.reuseIdentifier, for: indexPath)
++        (cell as? AyuEditHistoryCell)?.update(entry: self.entries[indexPath.row])
++        return cell
++    }
++
++    @objc private func closePressed() {
++        self.dismiss(animated: true)
++    }
++}
++
++/// Opens the edit history over `window`. `entries` go oldest first, the current text last.
++public func ayuPresentEditHistory(entries: [AyuEditHistoryEntry], window: UIWindow?) {
++    guard var presenter = window?.rootViewController else {
++        return
++    }
++    while let presented = presenter.presentedViewController {
++        presenter = presented
++    }
++    let navigationController = UINavigationController(rootViewController: AyuEditHistoryController(entries: entries))
++    if let sheet = navigationController.sheetPresentationController {
++        sheet.detents = [.medium(), .large()]
++        sheet.prefersGrabberVisible = true
++    }
++    presenter.present(navigationController, animated: true)
++}
+diff --git a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+index 404c52e..dad5725 100644
+--- a/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
++++ b/submodules/SettingsUI/Sources/AyuGram/AyuGramSettingsController.swift
+@@ -271,7 +271,7 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues, page: AyuGramSett
+         toggle(.saving, .saveDeleted, "Сохранять удалённые", values.saveDeletedMessages)
+         toggle(.saving, .saveHistory, "Сохранять историю правок", values.saveMessagesHistory)
+         toggle(.saving, .semiTransparent, "Полупрозрачные удалённые", values.semiTransparentDeletedMessages)
+-        footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑. Их список открывается долгим нажатием на аватарку чата → «Удалённые сообщения». История правок открывается из меню сообщения. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить; «Держать в фоне» (в «Дополнительно») помогает получать их в свёрнутом приложении.")
++        footer(.saving, "Удалённые сообщения остаются в чате с меткой 🗑. Их список открывается долгим нажатием на аватарку чата → «Удалённые сообщения». История правок открывается из меню сообщения: все версии текста, как в чате, старые сверху. Самоуничтожающиеся фото и видео после истечения таймера остаются в чате как удалённые. Всё хранится только на этом устройстве.\n\nСообщение сохраняется, только если приложение успело его получить; «Держать в фоне» (в «Дополнительно») помогает получать их в свёрнутом приложении.")
+ 
+         header(.sendWithoutSound, "ОТПРАВЛЯТЬ БЕЗ ЗВУКА")
+         choice(.sendWithoutSound, .sendWithoutSound(.never), "Никогда", values.sendWithoutSound == .never)
+@@ -307,7 +307,7 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues, page: AyuGramSett
+         if values.aiEnabled {
+             add { .apiKey(id: $0, section: .ai, text: values.aiApiKey) }
+         }
+-        footer(.ai, "В меню сообщения появится «Нейросеть»: краткий пересказ или ответ на вопрос из сообщения. Бесплатный ключ: aistudio.google.com → Get API key. Google не работает в России: нужен VPN или SOCKS5-прокси в настройках Telegram (MTProto-прокси не подходит).\n\nВ Google уходит только текст выбранного сообщения. Имена, @юзернеймы, ссылки t.me, номера телефонов, e-mail и длинные числа (ID) заменяются заглушками; имя чата, автор, ваш аккаунт и ID не отправляются. На бесплатном тарифе Google может использовать присланные тексты для улучшения своих моделей, поэтому не отправляйте личное.")
++        footer(.ai, "В меню сообщения появится «Нейросеть»: краткий пересказ, ответ на вопрос из сообщения или перевод (на русский, а русский текст — на английский). Ключ хранится в Keychain. Бесплатный ключ: aistudio.google.com → Get API key. Google не работает в России: нужен VPN или SOCKS5-прокси в настройках Telegram (MTProto-прокси не подходит).\n\nВ Google уходит только текст выбранного сообщения. Имена, @юзернеймы, ссылки t.me, номера телефонов, e-mail и длинные числа (ID) заменяются заглушками; имя чата, автор, ваш аккаунт и ID не отправляются. На бесплатном тарифе Google может использовать присланные тексты для улучшения своих моделей, поэтому не отправляйте личное.")
+ 
+         if values.aiEnabled {
+             header(.aiModel, "МОДЕЛЬ НЕЙРОСЕТИ")
+@@ -322,7 +322,7 @@ private func ayuGramSettingsEntries(values: AyuSettingsValues, page: AyuGramSett
+     case .other:
+         header(.background, "РАБОТА В ФОНЕ")
+         toggle(.background, .keepAlive, "Держать в фоне", values.keepAliveInBackground)
+-        footer(.background, "Не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи): соединение остаётся, удаления и правки приходят сразу, автоотправка продолжает работать. Закрытое смахиванием приложение не работает.")
++        footer(.background, "Не даёт iOS усыпить свёрнутое приложение (беззвучное аудио, больше расход батареи): соединение остаётся, удаления и правки приходят сразу, автоотправка продолжает работать. После звонка или чужого звука работа в фоне возобновляется сама. Закрытое смахиванием приложение не работает.")
+     }
+ 
+     return entries
+diff --git a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+index 2b7ed54..a339eff 100644
+--- a/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
++++ b/submodules/TelegramCore/Sources/AyuGram/AyuMessageAttributes.swift
+@@ -439,3 +439,52 @@ func ayuRepairDeletedMessageUnreadCounts(transaction: Transaction) {
+     }
+     transaction.updatePreferencesEntry(key: key, { _ in PreferencesEntry(AyuUnreadRepairState(completed: true)) })
+ }
++
++/// Lists a message kept by AyuGram in the deleted messages screen.
++func ayuIndexDeletedMessage(transaction: Transaction, id: MessageId) {
++    ayuAddToDeletedMessagesIndex(transaction: transaction, ids: [id], deletedAt: Int32(Date().timeIntervalSince1970))
++}
++
++private func ayuIsTimerAttribute(_ attribute: MessageAttribute) -> Bool {
++    return attribute is AutoclearTimeoutMessageAttribute || attribute is AutoremoveTimeoutMessageAttribute
++}
++
++/// A self-destructing message whose timer ran out, kept like a deleted one: it stays with its media
++/// and the 🗑 mark, without the timer that would hide or expire it. Only incoming cloud messages,
++/// never secret chats, and only while saving deleted messages is on.
++func ayuKeepExpiringMessage(transaction: Transaction, id: MessageId) -> Bool {
++    guard AyuSettings.shared.values.saveDeletedMessages, id.namespace == Namespaces.Message.Cloud, id.peerId.namespace != Namespaces.Peer.SecretChat, let message = transaction.getMessage(id), message.flags.contains(.Incoming) else {
++        return false
++    }
++    let wasDeleted = message.ayuDeletedAttribute != nil
++    let timestamp = Int32(Date().timeIntervalSince1970)
++    transaction.updateMessage(id, update: { current in
++        var attributes = current.attributes.filter { !ayuIsTimerAttribute($0) }
++        if !attributes.contains(where: { $0 is AyuDeletedMessageAttribute }) {
++            attributes.append(AyuDeletedMessageAttribute(deletedAt: timestamp))
++        }
++        var tags = current.tags
++        tags.remove(.unseenPersonalMessage)
++        let storeForwardInfo = current.forwardInfo.flatMap { forwardInfo in
++            StoreMessageForwardInfo(authorId: forwardInfo.author?.id, sourceId: forwardInfo.source?.id, sourceMessageId: forwardInfo.sourceMessageId, date: forwardInfo.date, authorSignature: forwardInfo.authorSignature, psaType: forwardInfo.psaType, flags: forwardInfo.flags)
++        }
++        return .update(StoreMessage(id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId, groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp, flags: StoreMessageFlags(current.flags), tags: tags, globalTags: current.globalTags, localTags: current.localTags, forwardInfo: storeForwardInfo, authorId: current.author?.id, text: current.text, attributes: attributes, media: current.media))
++    })
++    if !wasDeleted {
++        ayuIndexDeletedMessage(transaction: transaction, id: id)
++    }
++    return true
++}
++
++/// The server replaces opened view-once media with an "expired" placeholder; the copy already on the
++/// device is kept instead, as a deleted message.
++func ayuKeepExpiredMedia(previous: Message, updated: StoreMessage) -> StoreMessage? {
++    guard AyuSettings.shared.values.saveDeletedMessages, previous.flags.contains(.Incoming), previous.id.peerId.namespace != Namespaces.Peer.SecretChat, updated.media.contains(where: { $0 is TelegramMediaExpiredContent }), previous.media.contains(where: { $0 is TelegramMediaImage || $0 is TelegramMediaFile }) else {
++        return nil
++    }
++    var attributes = updated.attributes.filter { !ayuIsTimerAttribute($0) }
++    if !attributes.contains(where: { $0 is AyuDeletedMessageAttribute }) {
++        attributes.append(AyuDeletedMessageAttribute(deletedAt: Int32(Date().timeIntervalSince1970)))
++    }
++    return updated.withUpdatedMedia(previous.media).withUpdatedAttributes(attributes)
++}
+diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+index 6b159eb..e33bb9d 100644
+--- a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
++++ b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+@@ -4690,6 +4690,7 @@ func replayFinalState(
+                 }
+             case let .EditMessage(id, message):
+                 var generatedEvent: (reactionAuthor: Peer, reaction: MessageReaction.Reaction, message: Message, timestamp: Int32)?
++                var ayuKeptExpiredMedia = false
+                 transaction.updateMessage(id, update: { previousMessage in
+                     let peers: [PeerId:Peer] = previousMessage.peers.reduce([:], { current, value in
+                         var current = current
+@@ -4708,8 +4709,15 @@ func replayFinalState(
+                         attributes.append(history)
+                         merged = merged.withUpdatedAttributes(attributes)
+                     }
++                    if let kept = ayuKeepExpiredMedia(previous: previousMessage, updated: merged) {
++                        merged = kept
++                        ayuKeptExpiredMedia = true
++                    }
+                     return .update(merged)
+                 })
++                if ayuKeptExpiredMedia {
++                    ayuIndexDeletedMessage(transaction: transaction, id: id)
++                }
+                 if let generatedEvent = generatedEvent {
+                     addedReactionEvents.append(generatedEvent)
+                 }
+diff --git a/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift b/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift
+index 713bf6f..106deb1 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift
+@@ -82,7 +82,10 @@ func managedAutoremoveMessageOperations(network: Network, postbox: Postbox, isRe
+                     Logger.shared.log("Autoremove", "Performing autoremove for \(entry.messageId), isRemove: \(isRemove)")
+ 
+                     if let message = transaction.getMessage(entry.messageId) {
+-                        if message.id.peerId.namespace == Namespaces.Peer.SecretChat || isRemove {
++                        if ayuKeepExpiringMessage(transaction: transaction, id: message.id) {
++                            // AyuGram: kept as a deleted message instead of removed or expired.
++                            transaction.clearTimestampBasedAttribute(id: entry.messageId, tag: tag)
++                        } else if message.id.peerId.namespace == Namespaces.Peer.SecretChat || isRemove {
+                             _internal_deleteMessages(transaction: transaction, mediaBox: postbox.mediaBox, ids: [entry.messageId])
+                         } else {
+                             transaction.updateMessage(message.id, update: { currentMessage in
+diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift
+index eb275d3..7a945bb 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/AccessoryItemIconButton.swift
+@@ -14,6 +14,7 @@ private let accessoryButtonFont = Font.medium(14.0)
+ 
+ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundView.ContentView {
+     private var item: ChatTextInputAccessoryItem
++    private var ayuActiveBackground: UIView?
+     private var theme: PresentationTheme
+     private var strings: PresentationStrings
+     private var width: CGFloat
+@@ -53,6 +54,14 @@ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundVie
+         self.tintMask.addSubview(self.iconImageView.tintMask)
+         
+         switch item {
++        case .ayuAI, .ayuShowDeleted, .ayuAutoDelete:
++            // AyuGram: a gray circle behind the icon while the function is on in this chat.
++            let activeBackground = UIView()
++            activeBackground.isUserInteractionEnabled = false
++            activeBackground.backgroundColor = UIColor.systemGray.withAlphaComponent(0.35)
++            activeBackground.isHidden = true
++            self.insertSubview(activeBackground, at: 0)
++            self.ayuActiveBackground = activeBackground
+         case .input, .botInput, .silentPost:
+             self.iconImageView.isHidden = true
+             self.iconImageView.tintMask.isHidden = true
+@@ -209,6 +218,20 @@ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundVie
+         let previousItem = self.item
+         self.item = item
+         
++        if let ayuActiveBackground = self.ayuActiveBackground {
++            var isActive = false
++            switch item {
++            case let .ayuAI(value), let .ayuShowDeleted(value), let .ayuAutoDelete(value):
++                isActive = value
++            default:
++                break
++            }
++            let side = min(size.width, size.height)
++            ayuActiveBackground.frame = CGRect(x: floor((size.width - side) / 2.0), y: floor((size.height - side) / 2.0), width: side, height: side)
++            ayuActiveBackground.layer.cornerRadius = side / 2.0
++            ayuActiveBackground.isHidden = !isActive
++        }
++        
+         let (updatedImage, text, _, _, insets) = AccessoryItemIconButton.imageAndInsets(item: item, theme: self.theme, strings: self.strings)
+         
+         if let image = self.iconImageView.image {
+diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+index 9a86498..f857bd0 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+@@ -6043,6 +6043,11 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
+                         self.view.window?.endEditing(true)
+                         AyuChatTools.shared.buttonPressed(feature, context: context, peerId: peerId, present: { [weak self] controller in
+                             self?.interfaceInteraction?.presentController(controller, nil)
++                        }, updated: { [weak self] in
++                            // Recomputes the buttons, so the switched one shows its new state.
++                            self?.interfaceInteraction?.updateTextInputStateAndMode { state, mode in
++                                return (state, mode)
++                            }
+                         })
+                     }
+                 }
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift b/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift
+index c0df535..45b0bf6 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceInputContexts.swift
+@@ -11,6 +11,7 @@ import TextFormat
+ import ChatContextQuery
+ import ChatTextInputPanelNode
+ import AyuGramSettings
++import AyuAutoSend
+ 
+ func serviceTasksForChatPresentationIntefaceState(context: AccountContext, chatPresentationInterfaceState: ChatPresentationInterfaceState, updateState: @escaping ((ChatPresentationInterfaceState) -> ChatPresentationInterfaceState) -> Void) -> [AnyHashable: () -> Disposable] {
+     // Read the STRUCTURAL model, not the derived `inputText`: the flat projection drops whole blocks
+@@ -260,14 +261,15 @@ func inputTextPanelStateForChatPresentationInterfaceState(_ chatPresentationInte
+                     } else {
+                         let ayuValues = AyuSettings.shared.values
+                         if isTextEmpty, let user = chatPresentationInterfaceState.renderedPeer?.peer as? TelegramUser, user.botInfo == nil, user.id != context.account.peerId, chatPresentationInterfaceState.chatLocation.threadId == nil {
++                            let tools = AyuChatTools.shared
+                             if ayuValues.autoDeleteIncomingEnabled {
+-                                accessoryItems.append(.ayuAutoDelete)
++                                accessoryItems.append(.ayuAutoDelete(isActive: tools.isEnabled(.autoDelete, context: context, peerId: user.id)))
+                             }
+                             if ayuValues.showDeletedToSenderEnabled {
+-                                accessoryItems.append(.ayuShowDeleted)
++                                accessoryItems.append(.ayuShowDeleted(isActive: tools.isEnabled(.showDeleted, context: context, peerId: user.id)))
+                             }
+                             if ayuValues.aiResponderEnabled {
+-                                accessoryItems.append(.ayuAI)
++                                accessoryItems.append(.ayuAI(isActive: tools.isEnabled(.ai, context: context, peerId: user.id)))
+                             }
+                         }
+                         if ayuValues.autoSendEnabled {
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index c07bf8e..b3e6591 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -1350,19 +1350,22 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+         
+         let isCopyProtected = chatPresentationInterfaceState.copyProtectionEnabled || message.isCopyProtected()
+         
+-        // AyuGram: the earlier texts of an edited message.
++        // AyuGram: the earlier texts of an edited message, as a chat of its versions.
+         if let editHistory = message.ayuEditHistoryAttribute, !editHistory.revisions.isEmpty {
++            let historyWindow = context.sharedContext.mainWindow?.hostView.containerView.window
+             actions.append(.action(ContextMenuActionItem(text: "История правок", icon: { theme in
+                 return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Edit"), color: theme.actionSheet.primaryTextColor)
+             }, action: { c, _ in
+                 c?.dismiss(completion: {
+-                    let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+-                    var text = ""
+-                    for revision in editHistory.revisions {
+-                        text += "\(stringForMediumDate(timestamp: revision.date, strings: presentationData.strings, dateTimeFormat: presentationData.dateTimeFormat))\n\(revision.text)\n\n"
++                    var entries = editHistory.revisions.map { AyuEditHistoryEntry(text: $0.text, date: $0.date, isCurrent: false) }
++                    var currentDate: Int32?
++                    for attribute in message.attributes {
++                        if let attribute = attribute as? EditedMessageAttribute {
++                            currentDate = attribute.date
++                        }
+                     }
+-                    text += "Сейчас:\n\(message.text)"
+-                    controllerInteraction.presentController(textAlertController(context: context, title: "История правок", text: text, actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_OK, action: {})]), nil)
++                    entries.append(AyuEditHistoryEntry(text: message.text, date: currentDate, isCurrent: true))
++                    ayuPresentEditHistory(entries: entries, window: historyWindow)
+                 })
+             })))
+         }
+@@ -1396,8 +1399,16 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+                     c?.popItems()
+                 })))
+                 subItems.append(.separator)
+-                for aiAction in [AyuAIAction.summarize, AyuAIAction.answer] {
+-                    let symbolName = aiAction == .summarize ? "text.alignleft" : "questionmark.circle"
++                for aiAction in [AyuAIAction.summarize, AyuAIAction.answer, AyuAIAction.translate] {
++                    let symbolName: String
++                    switch aiAction {
++                    case .summarize:
++                        symbolName = "text.alignleft"
++                    case .answer:
++                        symbolName = "questionmark.circle"
++                    case .translate:
++                        symbolName = "globe"
++                    }
+                     subItems.append(.action(ContextMenuActionItem(text: aiAction.title, icon: { theme in
+                         return generateTintedImage(image: UIImage(systemName: symbolName, withConfiguration: UIImage.SymbolConfiguration(pointSize: 18.0, weight: .regular)), color: theme.actionSheet.primaryTextColor)
+                     }, iconPosition: .left, action: { c, _ in
+diff --git a/submodules/TelegramUI/Sources/SharedWakeupManager.swift b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+index 29ca326..a154a0b 100644
+--- a/submodules/TelegramUI/Sources/SharedWakeupManager.swift
++++ b/submodules/TelegramUI/Sources/SharedWakeupManager.swift
+@@ -94,6 +94,7 @@ public final class SharedWakeupManager {
+     private var silenceAudioRenderer: MediaPlayerAudioRenderer?
+     private var ayuKeepAliveInBackground: Bool = false
+     private var ayuSettingsDisposable: Disposable?
++    private var ayuAudioObservers: [NSObjectProtocol] = []
+     
+     private var accountsAndTasks: [(Account, Bool, AccountTasks)] = []
+     
+@@ -182,6 +183,23 @@ public final class SharedWakeupManager {
+             strongSelf.checkTasks()
+         })
+         
++        // AyuGram: a phone call or another app's sound interrupts the keep-alive silence, and iOS does not
++        // restart it. It starts again when the interruption ends or the audio services come back.
++        let interruptionObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), queue: nil, using: { [weak self] notification in
++            guard let info = notification.userInfo, let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt, let type = AVAudioSession.InterruptionType(rawValue: typeValue), type == .ended else {
++                return
++            }
++            Queue.mainQueue().async {
++                self?.ayuRestartKeepAlive()
++            }
++        })
++        let resetObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: AVAudioSession.sharedInstance(), queue: nil, using: { [weak self] _ in
++            Queue.mainQueue().after(1.0, {
++                self?.ayuRestartKeepAlive()
++            })
++        })
++        self.ayuAudioObservers = [interruptionObserver, resetObserver]
++        
+         self.hasActiveAudioSessionDisposable = (hasActiveAudioSession
+         |> deliverOnMainQueue).startStrict(next: { [weak self] value in
+             guard let strongSelf = self else {
+@@ -373,6 +391,9 @@ public final class SharedWakeupManager {
+         self.inForegroundDisposable?.dispose()
+         self.hasActiveAudioSessionDisposable?.dispose()
+         self.ayuSettingsDisposable?.dispose()
++        for observer in self.ayuAudioObservers {
++            NotificationCenter.default.removeObserver(observer)
++        }
+         self.tasksDisposable?.dispose()
+         self.pendingMediaUploadsDisposable?.dispose()
+         self.pendingStoryUploadsDisposable?.dispose()
+@@ -1186,6 +1207,17 @@ public final class SharedWakeupManager {
+         }
+     }
+     
++    /// Replaces silence that the system stopped, if keep-alive should be running.
++    private func ayuRestartKeepAlive() {
++        guard let silenceAudioRenderer = self.silenceAudioRenderer else {
++            return
++        }
++        self.silenceAudioRenderer = nil
++        silenceAudioRenderer.stop()
++        Logger.shared.log("Wakeup", "AyuGram keep-alive restarting after an audio interruption")
++        self.checkTasks()
++    }
++    
+     private func updateAccounts(hasTasks: Bool, endTaskAfterTransactionsComplete: UIBackgroundTaskIdentifier?) {
+         let hasBackgroundLocationTask = self.accountsAndTasks.contains(where: { $0.2.backgroundLocation })
+         

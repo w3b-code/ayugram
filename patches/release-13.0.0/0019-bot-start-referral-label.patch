@@ -1,0 +1,69 @@
+diff --git a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+index f857bd04..7737665a 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift
+@@ -228,6 +228,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
+     private let menuButtonTextNode: ImmediateTextNode
+     
+     private let startButton: SolidRoundedButtonNode
++    private var ayuStartButtonIsRestart: Bool?
+     
+     public let sendAsAvatarButtonNode: HighlightableButtonNode
+     public let sendAsAvatarReferenceNode: ContextReferenceContentNode
+@@ -1942,6 +1943,25 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
+             let previousState = self.presentationInterfaceState
+             self.presentationInterfaceState = interfaceState
+             
++            // AyuGram: like AyuGram Desktop, show the start (referral) parameter the bot was opened with
++            // in the Start button's title: "<Start> (start=<first 20 characters>)".
++            // A blocked bot gets "Restart Bot" like Telegram for Android and Desktop: pressing the button
++            // already unblocks the bot and sends /start.
++            var ayuStartTitle = interfaceState.strings.Bot_Start
++            if interfaceState.peerIsBlocked {
++                ayuStartTitle = interfaceState.strings.Bot_Unblock
++            }
++            if let payload = interfaceState.botStartPayload, !payload.isEmpty {
++                ayuStartTitle = "\(ayuStartTitle) (start=\(String(payload.prefix(20))))"
++            }
++            if self.startButton.title != ayuStartTitle {
++                self.startButton.title = ayuStartTitle
++            }
++            // The restart button of a blocked bot is red, like on Android and Desktop.
++            if !themeUpdated && !isFirstTime && self.ayuStartButtonIsRestart != interfaceState.peerIsBlocked {
++                self.ayuApplyStartButtonTheme(interfaceState)
++            }
++            
+             if case .webView = interfaceState.botMenuButton, self.menuButtonIconNode.iconState == .menu {
+                 self.menuButtonIconNode.enqueueState(.app, animated: false)
+             } else if case .commands = interfaceState.botMenuButton, self.menuButtonIconNode.iconState == .app {
+@@ -1949,7 +1969,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
+             }
+             if themeUpdated || isFirstTime {
+                 self.menuButtonIconNode.customColor = interfaceState.theme.chat.inputPanel.actionControlForegroundColor
+-                self.startButton.updateTheme(SolidRoundedButtonTheme(theme: interfaceState.theme))
++                self.ayuApplyStartButtonTheme(interfaceState)
+                 
+                 self.sendAsCloseIconView.image = generateImage(CGSize(width: 34.0, height: 34.0), rotatedContext: { size, context in
+                     context.clear(CGRect(origin: CGPoint(), size: size))
+@@ -6224,3 +6244,21 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
+         return AttachmentInputPanelTransition(inputNode: self, accessoryPanelNode: accessoryPanelNode, menuButtonNode: self.menuButton, menuButtonBackgroundView: self.menuButtonBackgroundView, menuIconNode: self.menuButtonIconNode, menuTextNode: self.menuButtonTextNode, prepareForDismiss: { self.menuButtonIconNode.enqueueState(.app, animated: false) })
+     }
+ }
++
++extension ChatTextInputPanelNode {
++    fileprivate func ayuApplyStartButtonTheme(_ interfaceState: ChatPresentationInterfaceState) {
++        let isRestart = interfaceState.peerIsBlocked
++        self.ayuStartButtonIsRestart = isRestart
++        if isRestart {
++            let theme = interfaceState.theme
++            self.startButton.updateTheme(SolidRoundedButtonTheme(
++                backgroundColor: theme.list.itemDestructiveColor,
++                foregroundColor: .white,
++                disabledBackgroundColor: theme.list.plainBackgroundColor.mixedWith(theme.list.itemDisabledTextColor, alpha: 0.15),
++                disabledForegroundColor: theme.list.itemDisabledTextColor
++            ))
++        } else {
++            self.startButton.updateTheme(SolidRoundedButtonTheme(theme: interfaceState.theme))
++        }
++    }
++}

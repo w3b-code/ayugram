@@ -43,7 +43,8 @@ jobs:
       - name: Checkout this repository
         uses: actions/checkout@v4
         with:
-          ref: ios
+          # A manual run builds the branch it was started from (main mirrors ios); pushes build ios.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name != 'main' && github.ref_name || 'ios' }}
 
       - name: Set iOS build number
         run: echo "AYUGRAM_BUILD_NUMBER=$((100 + ${{ github.run_number }}))" >> "$GITHUB_ENV"
@@ -95,6 +96,10 @@ jobs:
             echo "Applying $p"
             git apply --whitespace=nowarn "$p"
           done
+
+      - name: Refresh expired fake provisioning profiles
+        # Telegram's fake profiles expired on 2026-10-30; the build rejects an expired profile.
+        run: python3 scripts/refresh-fake-profiles.py telegram
 
       - name: Configure provisioned App Group
         run: python3 scripts/configure-app-group.py telegram
