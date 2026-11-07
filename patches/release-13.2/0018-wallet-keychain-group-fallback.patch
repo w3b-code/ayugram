@@ -1,0 +1,102 @@
+diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
+index e11b7649e7..735ef376d9 100644
+--- a/submodules/TelegramUI/Sources/AppDelegate.swift
++++ b/submodules/TelegramUI/Sources/AppDelegate.swift
+@@ -566,7 +566,7 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+         let baseAppBundleId = Bundle.main.bundleIdentifier!
+         let appGroupName = "group.\(baseAppBundleId)"
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
+-            BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
++            AyuWalletKeychainGroup.resolve(baseAppBundleId: baseAppBundleId)
+         })
+         var maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
+         if maybeAppGroupUrl == nil {
+diff --git a/submodules/TelegramUI/Sources/AyuWalletDiagnosticsReport.swift b/submodules/TelegramUI/Sources/AyuWalletDiagnosticsReport.swift
+index 32ad6fac8f..d80487bdaf 100644
+--- a/submodules/TelegramUI/Sources/AyuWalletDiagnosticsReport.swift
++++ b/submodules/TelegramUI/Sources/AyuWalletDiagnosticsReport.swift
+@@ -19,6 +19,7 @@ func ayuDescribeWalletState(_ state: WalletContext.State) -> String {
+     case let .failed(error):
+         lines.append("Состояние: ошибка хранилища — \(error)")
+     }
++    lines.append("Группа Keychain: " + AyuWalletKeychainGroup.report)
+     lines.append("Адрес от сервера: " + (state.walletAddress == nil ? "не получен" : "получен"))
+     switch state.balance {
+     case .idle:
+diff --git a/submodules/TelegramUI/Sources/AyuWalletKeychainGroup.swift b/submodules/TelegramUI/Sources/AyuWalletKeychainGroup.swift
+new file mode 100644
+index 0000000000..9e2b9c3759
+--- /dev/null
++++ b/submodules/TelegramUI/Sources/AyuWalletKeychainGroup.swift
+@@ -0,0 +1,71 @@
++import Foundation
++import Security
++import BuildConfig
++
++// AyuGram: the wallet keeps its keys in the private keychain group "<seed>.<bundle id>". A re-signed
++// build is often not entitled to that exact group, and every wallet keychain call then fails with
++// errSecMissingEntitlement (-34018): the address disappears and Send stays disabled. Check the group
++// once per launch and fall back to the app's default keychain group, which is always entitled.
++enum AyuWalletKeychainGroup {
++    private static let lock = NSLock()
++    private static var reportValue = "не проверялась (кошелёк ещё не открывался)"
++
++    static var report: String {
++        lock.lock()
++        defer { lock.unlock() }
++        return reportValue
++    }
++
++    private static func setReport(_ value: String) {
++        lock.lock()
++        reportValue = value
++        lock.unlock()
++    }
++
++    static func resolve(baseAppBundleId: String) -> String? {
++        let candidate = BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
++        var candidateStatus: OSStatus = errSecParam
++        if let candidate, !candidate.isEmpty {
++            let probe = self.probe(group: candidate)
++            candidateStatus = probe.status
++            if probe.status == errSecSuccess {
++                self.setReport("\(candidate) — доступна")
++                return candidate
++            }
++        }
++        let fallback = self.probe(group: nil)
++        if fallback.status == errSecSuccess, let group = fallback.group, !group.isEmpty, !group.hasPrefix("group.") {
++            self.setReport("\(group) — используется вместо \(candidate ?? "нет") (ошибка \(candidateStatus))")
++            return group
++        }
++        self.setReport("\(candidate ?? "нет") — ошибка \(candidateStatus), запасная группа недоступна (\(fallback.status))")
++        return candidate
++    }
++
++    private static func probe(group: String?) -> (status: OSStatus, group: String?) {
++        var query: [String: Any] = [
++            kSecClass as String: kSecClassGenericPassword,
++            kSecAttrService as String: "ayugram.wallet-keychain-probe",
++            kSecAttrAccount as String: "probe",
++            kSecAttrSynchronizable as String: false
++        ]
++        if let group {
++            query[kSecAttrAccessGroup as String] = group
++        }
++        var readQuery = query
++        readQuery[kSecReturnAttributes as String] = true
++        readQuery[kSecMatchLimit as String] = kSecMatchLimitOne
++        var result: CFTypeRef?
++        var status = SecItemCopyMatching(readQuery as CFDictionary, &result)
++        if status == errSecItemNotFound {
++            var addQuery = query
++            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
++            addQuery[kSecValueData as String] = Data([1])
++            addQuery[kSecReturnAttributes as String] = true
++            result = nil
++            status = SecItemAdd(addQuery as CFDictionary, &result)
++        }
++        let resolvedGroup = (result as? [String: Any])?[kSecAttrAccessGroup as String] as? String
++        return (status, resolvedGroup)
++    }
++}
